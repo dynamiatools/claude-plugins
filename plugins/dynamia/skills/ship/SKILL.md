@@ -28,19 +28,17 @@ It works from the workspace root or from inside the batch worktree. In a batch w
 
 2. **Show the plan**: `ms-workspace plan <batch> [--pr]`. For every repo it lists the target branch, push mode, the commit subjects that would be sent and a diffstat. It refuses while agent branches are not integrated: run `/dynamia:integrate` first.
 
-   If the plan prints `RECOMMEND A PR` (many files, lines or new files) and the user did not ask for a PR, relay it in one line and offer the choice: open a PR (recommended for a big change) or push as configured. Never switch to a PR on your own; the user decides.
+   Then write the plan for the user in a few lines of plain text: per repo, the target branch, push or PR, and the commit subjects. If the plan prints `RECOMMEND A PR`, add one line saying so. Do not ask anything about it: the mode is the configured one unless the user already said `--pr`/`--direct`.
 
-3. **Confirm with the user** using `AskUserQuestion`, quoting the plan (repos, target branches and commit subjects so they see exactly what will be sent): ship now, ship with `--skip-e2e` (only if no e2e exists or the user explicitly accepts the risk), or stop. Never assume consent from earlier messages.
-
-4. **Ship**: `ms-workspace ship <batch> --yes [--pr]` (Claude Code asks for permission on this command by design; do not try to avoid it) (add `--skip-e2e` only if chosen). Never pass `--skip-gate`: the guard blocks it.
+3. **Ship, with one confirmation.** Run `ms-workspace ship <batch> --yes [--pr]` right after the plan text. Claude Code's permission prompt for this command (`ship` is in `ask` on purpose) is the single "are you sure?": do not add an `AskUserQuestion`, do not offer `--skip-e2e` or other variants, and do not try to avoid the prompt. Add `--skip-e2e` only if the user asked for it in this conversation. Never pass `--skip-gate`: the guard blocks it.
    - For a PR, write a descriptive title (imperative, under 70 characters, saying what the change does, not the batch name) and a short description (what and why, notable decisions, how it was verified) from the commits and diff you saw in the plan. Save the description to a file in the scratchpad and pass `--title "<title>" --body-file <file>`. These apply to every repo in the batch; with several repos, keep the text about the batch as a whole. Without them ship builds a basic title and body from the commits.
    - Base moved: it merges `origin/<base>` into the batch and re-runs the tests; this is expected.
    - Conflict, failed t1/e2e, or a rejected push: nothing further is pushed. Report the exact error and stop; do not retry blindly.
 
-5. **After success**: do not clean yet after a PR: it is still open. After a direct push of a batch, run `ms-workspace clean <batch>` without asking. A plain branch has nothing to clean: leave it, and tell the user it can be deleted once merged. Report the pushed repos in one line each, with the t1/e2e result taken from the ship output and anything skipped (`--skip-e2e`, repos without tests).
+4. **After success**: report the pushed repos in one line each, with the t1/e2e result taken from the ship output and anything skipped. Do not run `clean` (it has its own permission prompt): after a direct push say in one line that `ms-workspace clean <batch>` removes the batch; after a PR, that it works once the PR is merged. A plain branch has nothing to clean: tell the user it can be deleted once merged.
 
 ## Cleaning later
-`ms-workspace clean <batch>` first fetches the base branch from origin and removes the batch without any question only when its work is already there (plain, rebase or squash merge). If the PR is not merged yet it refuses and removes nothing. Do not ask the user first: run it, and if it refuses relay the one-line reason. Discard an unmerged batch only when the user says so (`--force`).
+`ms-workspace clean <batch>` first fetches the base branch from origin and removes the batch without any question only when its work is already there (plain, rebase or squash merge). If the PR is not merged yet it refuses and removes nothing. When the user asks for it, run it and, if it refuses, relay the one-line reason. Discard an unmerged batch only when the user says so (`--force`).
 
 ## Notes
 - Promotion from the base branch to QA/production is a separate, human decision outside this skill.
