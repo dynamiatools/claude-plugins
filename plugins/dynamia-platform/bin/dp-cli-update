@@ -1,0 +1,43 @@
+#!/bin/sh
+# Compares the installed Dynamia CLI (@dynamia-tools/cli) with the latest on npm and can update it. POSIX sh.
+#   dp-cli-update            prints one line: status=current|outdated|missing|unknown installed=X latest=Y
+#   dp-cli-update --apply    also runs `npm install -g @dynamia-tools/cli@latest` when outdated or missing
+# Check mode always exits 0 (offline or no npm gives status=unknown). --apply exits 1 when the update fails
+# or when npm's global folder is outside $HOME and not writable: it never uses sudo.
+
+PKG=@dynamia-tools/cli
+apply=no
+[ "$1" = "--apply" ] && apply=yes
+
+semver() { grep -oE '[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z.-]+)?' | head -n 1; }
+
+installed=$(dynamia --version 2>/dev/null | semver)
+latest=
+if command -v npm >/dev/null 2>&1; then
+  limit=; command -v timeout >/dev/null 2>&1 && limit="timeout 15"  # macOS has no timeout by default
+  latest=$($limit npm view "$PKG" version 2>/dev/null | semver)
+fi
+
+if [ -z "$latest" ]; then status=unknown
+elif [ -z "$installed" ]; then status=missing
+elif [ "$installed" = "$latest" ]; then status=current
+# shortcut: sort -V ignores pre-release order (1.0.0-beta vs 1.0.0); revisit if the CLI ships prereleases on latest
+elif [ "$(printf '%s\n%s\n' "$installed" "$latest" | sort -V | head -n 1)" = "$installed" ]; then status=outdated
+else status=current  # installed is newer than the registry's latest (a beta or a local build)
+fi
+
+echo "status=$status installed=${installed:-none} latest=${latest:-unknown}"
+[ "$apply" = yes ] || exit 0
+case $status in current|unknown) exit 0 ;; esac
+
+prefix=$(npm prefix -g 2>/dev/null)
+case $prefix in
+  "$HOME"/*) ;;
+  *) [ -w "$prefix" ] || { echo "npm's global folder ($prefix) needs sudo: run 'sudo npm install -g $PKG@latest' yourself" >&2; exit 1; } ;;
+esac
+if npm install -g "$PKG@latest" >&2; then
+  echo "updated: $(dynamia --version 2>/dev/null | semver) (was ${installed:-none})"
+else
+  echo "update failed: run 'npm install -g $PKG@latest' to see the error" >&2
+  exit 1
+fi

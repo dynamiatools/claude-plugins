@@ -13,6 +13,12 @@ dynamia --version; node -v; java -version 2>&1 | head -1; git --version
 ```
 Needs: CLI, Node >= 24, git, and JDK 25 (recommended). `${CLAUDE_PLUGIN_ROOT}/bin/dp-detect --facts` prints `cli`, `node` and `java` among other facts.
 
+### Keep the CLI current
+Run `${CLAUDE_PLUGIN_ROOT}/bin/dp-cli-update` before using the CLI (and whenever the user asks if it is up to date). It prints `status=current|outdated|missing|unknown installed=X latest=Y`, comparing with npm.
+- `outdated`: update it without asking, with `${CLAUDE_PLUGIN_ROOT}/bin/dp-cli-update --apply` (it runs `npm install -g @dynamia-tools/cli@latest`, never `sudo`). Say in one line `dynamia X -> Y`. If it exits 1 because npm's global folder needs `sudo`, show the message and let the user decide.
+- `missing`: follow step 2 (plan first, then confirm).
+- `unknown` (offline or no npm): say the latest version could not be checked and continue with the installed one.
+
 ## 2. Install what is missing (plan first, then confirm)
 - **Only the CLI is missing and Node >= 24 exists:** `npm install -g @dynamia-tools/cli`. Show the command and ask before running it.
 - **Node, JDK or git are missing:** use the official bootstrap, but never pipe it straight into a shell. Download it, read it, and tell the user what it does:
@@ -49,4 +55,4 @@ It creates `./<name>/` with `backend/` (Spring Boot + Dynamia, cloned from a Git
 Report the folder and what was created, then `cd` there and check `dp-detect`. Build/run commands come from the generated README: read it, do not guess. Errors carry codes like `DT-TEMPLATE-002`: quote them verbatim.
 
 ## Not verified here
-The CLI is in beta and its behavior was read from its source (`platform/packages/cli`), not run. If a flag is rejected, trust `dynamia new --help` / the error over this table.
+The CLI is in beta and its behavior was read from its source (`platform/packages/cli`), not run. `dp-cli-update` is tested against a fake `npm`, not against the real registry. If a flag is rejected, trust `dynamia new --help` / the error over this table.

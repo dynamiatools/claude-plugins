@@ -150,3 +150,72 @@ class Layout(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CliUpdate(unittest.TestCase):
+    """dp-cli-update with a fake `dynamia` and `npm` first on PATH."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self._tmp.name)
+        self.bin = self.d / "bin"
+        self.bin.mkdir()
+        self.log = self.d / "npm.log"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def fake(self, name, body):
+        p = self.bin / name
+        p.write_text("#!/bin/sh\n" + body)
+        p.chmod(0o755)
+
+    def setup_tools(self, installed, latest, install_ok=True):
+        if installed:
+            self.fake("dynamia", f'echo "dynamia/{installed} linux-x64"\n')
+        self.fake("npm", (
+            f'case "$1" in\n'
+            f'  view) [ -n "{latest}" ] && echo "{latest}" || exit 1 ;;\n'
+            f'  prefix) echo "$HOME/.npm-global" ;;\n'
+            f'  install) echo "$@" >> "{self.log}"; {"exit 0" if install_ok else "exit 1"} ;;\n'
+            f'esac\n'))
+
+    def run_cli(self, *args):
+        env = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": os.environ.get("HOME", "/root")}
+        return subprocess.run([str(BIN / "dp-cli-update"), *args], capture_output=True, text=True, timeout=20, env=env)
+
+    def test_current(self):
+        self.setup_tools("1.2.0", "1.2.0")
+        self.assertEqual(self.run_cli().stdout.strip(), "status=current installed=1.2.0 latest=1.2.0")
+
+    def test_outdated_check_does_not_install(self):
+        self.setup_tools("1.2.0", "1.10.0")
+        r = self.run_cli()
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "status=outdated installed=1.2.0 latest=1.10.0"))
+        self.assertFalse(self.log.exists())
+
+    def test_apply_installs_latest_when_outdated(self):
+        self.setup_tools("1.2.0", "1.3.0")
+        r = self.run_cli("--apply")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("install -g @dynamia-tools/cli@latest", self.log.read_text())
+
+    def test_apply_installs_when_missing(self):
+        self.setup_tools(None, "1.3.0")
+        self.assertIn("status=missing", self.run_cli("--apply").stdout)
+        self.assertTrue(self.log.exists())
+
+    def test_apply_does_nothing_when_current_or_newer(self):
+        self.setup_tools("2.0.0-beta.1", "1.3.0")
+        self.assertEqual(self.run_cli("--apply").returncode, 0)
+        self.assertFalse(self.log.exists())
+
+    def test_offline_is_unknown_and_never_installs(self):
+        self.setup_tools("1.2.0", "")
+        r = self.run_cli("--apply")
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "status=unknown installed=1.2.0 latest=unknown"))
+        self.assertFalse(self.log.exists())
+
+    def test_failed_install_exits_1(self):
+        self.setup_tools("1.2.0", "1.3.0", install_ok=False)
+        self.assertEqual(self.run_cli("--apply").returncode, 1)

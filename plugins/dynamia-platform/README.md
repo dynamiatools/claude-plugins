@@ -17,7 +17,7 @@ Claude Code plugin for projects built on [Dynamia Platform](https://dynamia.tool
 | `dynamia-platform:dates` | Migrate legacy `java.util.Date` code to `java.time` with `DateTimeUtils`, `LocalDateRange` and `QueryConditions` |
 | `dynamia-platform:extensions` | Use the framework extensions: entity-files (local, S3, Buckie), reports, http-functions (versioned third-party calls), finances (taxes, totals, money), dashboard, email-sms, file-importer and saas |
 | `dynamia-platform:docs` | Read the official docs and package READMEs live from GitHub, at the tag of the project's version |
-| `dynamia-platform:cli` | Check or install the `dynamia` CLI and create a project with `dynamia new` (flags only, never the interactive wizard) |
+| `dynamia-platform:cli` | Check, install or auto-update the `dynamia` CLI (`bin/dp-cli-update`) and create a project with `dynamia new` (flags only, never the interactive wizard) |
 
 ## Hooks
 
@@ -29,6 +29,8 @@ Claude Code plugin for projects built on [Dynamia Platform](https://dynamia.tool
 Both are POSIX `sh` with no dependencies (Linux, macOS), never fail the session, and the guard blocks only an unmistakable `dynamia new`.
 
 ## Tools
+
+`bin/dp-cli-update [--apply]` compares the installed CLI with the latest on npm (`status=current|outdated|missing|unknown`); with `--apply` it updates it. It never uses `sudo`: a global npm folder outside `$HOME` that is not writable stops with a message.
 
 `bin/dp-detect [dir]` prints the summary; `--facts` prints `key=value` lines (backend, zk, vue, sdk, microfrontend, descriptors, version, cli, node, java).
 
