@@ -9,11 +9,13 @@ Supported: MySQL and Percona Server 8.4 and later, MariaDB 10.11 and later. Olde
 
 ## Password rules (never break these)
 
-- A password never appears in a command, a profile, a file you write, or your answer. The tool reads it from `~/.config/dynamia-mysql/secrets.env` (mode 600) and gives it to the client through a temporary 0600 option file. A guard hook blocks `-pSECRET`, `--password=`, `MYSQL_PWD=` and any attempt to read the secrets file.
+- A password never appears in a command, a profile, a file you write, or your answer. The tool reads it from `~/.config/dynamia-mysql/secrets.env` (mode 600) and gives it to the client through a temporary 0600 option file. A guard hook denies `-pSECRET`, `--password=`, `MYSQL_PWD=`, literal passwords in SQL, and the obvious ways to read the secrets folder, its temporary files, `~/.my.cnf` or `/etc/mysql`. It is a guard against mistakes, not a sandbox: never try to get around it, and never read those files by any other route.
 - You cannot type a secret for the user. Tell them to run it themselves in this prompt:
   `! python3 ${CLAUDE_PLUGIN_ROOT}/bin/mysql-tool secret-set PROD_DB_PW`
   For a password you must create (a replication user), they run `secret-gen REPL_PW` and nobody sees it.
-- In SQL, write `'@@ENV:REPL_PW@@'`. The tool substitutes the escaped value at run time.
+- In SQL, write `'@@ENV:REPL_PW@@'`. The tool substitutes the value at run time. Only secrets named `REPL_...` or `CLONE_...` may be sent to another server (replication and clone accounts); a login secret such as `PROD_DB_PW` can never be placed in SQL, and placeholders are refused in `query`.
+- A secret needs 8 or more characters and no quotes, backslashes or control characters.
+- Read `profiles.toml` with the Read tool if needed; it holds no secrets. Never `cat` or `grep` the folder.
 
 ## Steps
 

@@ -148,13 +148,13 @@ class ReplicaStatusTest(unittest.TestCase):
 
 
 class PlannerTest(unittest.TestCase):
-    def facts(self, flavor="mysql", ver="8.4.3", sid="1", gtid="ON", binlog="ON"):
+    def facts(self, flavor="mysql", ver="8.4.3", sid="1", gtid="ON", binlog="ON", data=5 * 1024 ** 3, **extra):
         v = tool.parse_version(ver)
         return {"version": ver, "comment": "", "flavor": flavor, "ver": v, "supported": tool.supported(flavor, v),
-                "data_bytes": 5 * 1024 ** 3, "vars": {"server_id": sid, "gtid_mode": gtid, "log_bin": binlog}}
+                "data_bytes": data, "vars": {"server_id": sid, "gtid_mode": gtid, "log_bin": binlog, **extra}}
 
     def test_clean_plan_has_confirm_steps_and_no_secrets(self):
-        s, r = self.facts(), self.facts(sid="2")
+        s, r = self.facts(), self.facts(sid="2", data=0)
         self.assertEqual(tool.blockers_for(s, r, "xtrabackup"), [])
         text = tool.runbook(s, r, "xtrabackup", "src", "rep")
         self.assertIn("SOURCE_AUTO_POSITION=1", text)
@@ -164,7 +164,7 @@ class PlannerTest(unittest.TestCase):
         self.assertNotIn("RESET BINARY LOGS AND GTIDS\"", text)
 
     def test_mariadb_runbook_uses_gtid_slave_pos(self):
-        s, r = self.facts("mariadb", "11.4.2"), self.facts("mariadb", "11.4.2", sid="2")
+        s, r = self.facts("mariadb", "11.4.2"), self.facts("mariadb", "11.4.2", sid="2", data=0)
         text = tool.runbook(s, r, "mariabackup", "src", "rep")
         self.assertIn("MASTER_USE_GTID=slave_pos", text)
         self.assertIn("gtid_slave_pos", text)

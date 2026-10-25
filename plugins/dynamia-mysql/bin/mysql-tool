@@ -12,9 +12,9 @@ argv, in the output or in this tool's config: a profile names a secret, the secr
   mysql-tool info|inspect|replica-status PROFILE [--json] [--max-lag N]
   mysql-tool query PROFILE "SELECT ..."      read-only: one SELECT/SHOW/DESCRIBE/EXPLAIN SELECT
   mysql-tool exec PROFILE "SQL; SQL"         only the replication-setup statements in WRITE_OK
-  mysql-tool plan-replica --source P --replica P --method xtrabackup|mariabackup|clone|dump
+  mysql-tool plan-replica --source P --replica P --method xtrabackup|mariabackup|clone|dump [--rebuild]
   mysql-tool diagnose REPLICA --source P     why a replica is broken and the safe way out
-  mysql-tool plan-failover --candidate P [--old-source P] [--other P ...]
+  mysql-tool plan-failover --candidate P (--old-source P | --source-down) [--other P ...]
   mysql-tool backup P --method xtrabackup|mariabackup|dump --target DIR [--dry-run]
   mysql-tool verify-backup DIR
   mysql-tool audit-config|audit-accounts|slow-queries|locks|upgrade-check P
@@ -32,6 +32,7 @@ import os
 import re
 import secrets as _secrets
 import shutil
+import signal
 import string
 import subprocess
 import sys
@@ -71,8 +72,10 @@ def load_secrets():
 def store_secret(name, value, force=False):
     if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
         raise Fail("secret names are UPPER_SNAKE_CASE")
-    if "\n" in value or not value:
-        raise Fail("secret must be a single non-empty line")
+    if len(value) < 8:
+        raise Fail("a secret needs at least 8 characters (shorter ones cannot be redacted reliably)")
+    if re.search(r"[\x00-\x1f\x7f'\"\\]", value):
+        raise Fail("a secret may not contain quotes, backslashes or control characters (they break SQL and option files)")
     cur = load_secrets()
     if name in cur and not force:
         raise Fail("%s already exists (use --force to replace it)" % name)
@@ -121,12 +124,19 @@ def fill_placeholders(sql):
     return re.sub(r"@@ENV:([A-Z][A-Z0-9_]*)@@", sub, sql)
 
 
+HASH_RX = [(re.compile(r"(?i)(identified\s+(?:by\s+password|with\s+\w+\s+as)\s+)'[^']*'"), r"\1'***'"),
+           (re.compile(r"\*[0-9A-F]{40}\b"), "***"), (re.compile(r"\$[AB]\$\d+\$[./0-9A-Za-z]{20,}"), "***")]
+
+
 def redact(text, extra=()):
     values = [v for v in list(load_secrets().values()) + list(extra) if len(v) >= 4]
     for v in sorted(values, key=len, reverse=True):
         text = text.replace(v, "***")
     text = re.sub(r"(?i)((?:source|master)_password\s*=\s*)'(?:[^'\\]|\\.|'')*'", r"\1'***'", text)
-    return re.sub(r"(?i)(identified\s+(?:with\s+\w+\s+)?by\s+)'(?:[^'\\]|\\.|'')*'", r"\1'***'", text)
+    text = re.sub(r"(?i)(identified\s+(?:with\s+\w+\s+)?by\s+)'(?:[^'\\]|\\.|'')*'", r"\1'***'", text)
+    for rx, sub in HASH_RX:
+        text = rx.sub(sub, text)
+    return text
 
 
 def client_binary(prof):
@@ -136,46 +146,110 @@ def client_binary(prof):
     raise Fail("no mysql or mariadb client binary found in PATH")
 
 
-def run_sql(prof, sql, readonly=True, timeout=60):
-    """Runs sql through the client over stdin. Returns stdout. Raises Fail with a redacted message."""
+_MARIADB_CLIENT = {}
+
+
+def client_is_mariadb(binary):
+    """Asks the client itself: on MariaDB hosts /usr/bin/mysql is often a symlink to mariadb."""
+    if binary not in _MARIADB_CLIENT:
+        try:
+            r = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=10)
+            _MARIADB_CLIENT[binary] = "mariadb" in (r.stdout + r.stderr).lower()
+        except (OSError, subprocess.TimeoutExpired):
+            _MARIADB_CLIENT[binary] = "mariadb" in os.path.basename(binary)
+    return _MARIADB_CLIENT[binary]
+
+
+def tmp_dir(max_age=3600):
+    """Private scratch folder. Files older than max_age are leftovers of a killed run and are removed."""
+    import time
+    d = os.path.join(HOME(), "tmp")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    os.chmod(d, 0o700)
+    for name in os.listdir(d):
+        p = os.path.join(d, name)
+        try:
+            if time.time() - os.path.getmtime(p) > max_age:
+                os.unlink(p)
+        except OSError:
+            pass
+    return d
+
+
+def write_cnf(pw):
+    fd, path = tempfile.mkstemp(dir=tmp_dir(), suffix=".cnf")  # mkstemp creates it with mode 0600
+    with os.fdopen(fd, "w") as fh:
+        fh.write('[client]\npassword="%s"\n' % pw)  # secrets cannot hold quotes or backslashes
+    return path
+
+
+def client_args(prof, readonly):
+    """Returns (argv, option file to delete or None, password or None). The password is never in argv."""
     binary = client_binary(prof)
     pw = None
     if prof.get("secret"):
         pw = load_secrets().get(prof["secret"])
         if pw is None:
             raise Fail("secret %s is not set (user: ! mysql-tool secret-set %s)" % (prof["secret"], prof["secret"]))
-    cnf = None
-    args = [binary]
+    args, cnf = [binary], None
+    if prof.get("login_path"):
+        args.append("--login-path=%s" % prof["login_path"])
+    elif pw is not None:
+        cnf = write_cnf(pw)
+        args.insert(1, "--defaults-extra-file=%s" % cnf)
+    args += ["--batch", "--connect-timeout=10", "--default-character-set=utf8mb4",
+             "--host=%s" % prof.get("host", "127.0.0.1"), "--port=%s" % prof.get("port", 3306),
+             "--user=%s" % prof["user"]]
+    if prof.get("socket"):
+        args += ["--socket=%s" % prof["socket"]]
+    mode = str(prof.get("ssl_mode", "")).upper()
+    if mode:
+        if client_is_mariadb(binary):
+            args += ["--skip-ssl"] if mode == "DISABLED" else ["--ssl"] + (["--ssl-verify-server-cert"] if mode.startswith("VERIFY") else [])
+        else:
+            args += ["--ssl-mode=%s" % mode]
+    if readonly:
+        args += ["--init-command=SET SESSION TRANSACTION READ ONLY"]
+    return args, cnf, pw
+
+
+def run_sql(prof, sql, readonly=True, timeout=60):
+    """Runs sql through the client over stdin. Returns stdout. Raises Fail with a redacted message."""
+    args, cnf, pw = client_args(prof, readonly)
+    extra = [pw] if pw else []
     try:
-        if pw is not None or prof.get("login_path"):
-            if prof.get("login_path"):
-                args.append("--login-path=%s" % prof["login_path"])
-            else:
-                d = os.path.join(HOME(), "tmp")
-                os.makedirs(d, mode=0o700, exist_ok=True)
-                fd, cnf = tempfile.mkstemp(dir=d, suffix=".cnf")
-                with os.fdopen(fd, "w") as fh:
-                    esc = pw.replace("\\", "\\\\").replace('"', '\\"')
-                    fh.write('[client]\npassword="%s"\n' % esc)
-                args.insert(1, "--defaults-extra-file=%s" % cnf)
-        args += ["--batch", "--connect-timeout=10", "--default-character-set=utf8mb4",
-                 "--host=%s" % prof.get("host", "127.0.0.1"), "--port=%s" % prof.get("port", 3306),
-                 "--user=%s" % prof["user"]]
-        if prof.get("socket"):
-            args += ["--socket=%s" % prof["socket"]]
-        if prof.get("ssl_mode"):
-            args += ["--ssl-mode=%s" % prof["ssl_mode"]] if "mariadb" not in os.path.basename(binary) \
-                else (["--ssl"] if prof["ssl_mode"].upper() != "DISABLED" else [])
-        if readonly:
-            args += ["--init-command=SET SESSION TRANSACTION READ ONLY"]
         try:
             r = subprocess.run(args, input=fill_placeholders(sql), capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
-            raise Fail("timeout after %ss" % timeout)
+            raise Fail("timeout after %ss; the statement may still be running on the server" % timeout)
         if r.returncode:
-            raise Fail(redact(r.stderr.strip() or "client exited %d" % r.returncode, [pw] if pw else []))
-        return redact(r.stdout, [pw] if pw else [])
+            raise Fail(redact(r.stderr.strip() or "client exited %d" % r.returncode, extra))
+        return redact(r.stdout, extra)
     finally:
+        if cnf and os.path.exists(cnf):
+            os.unlink(cnf)
+
+
+def start_detached(prof, sql, wait=5):
+    """For statements that can run for hours (CLONE): start the client, report an early error, then leave it running."""
+    args, cnf, pw = client_args(prof, False)
+    log = tempfile.NamedTemporaryFile(dir=tmp_dir(), suffix=".log", delete=False)
+    try:
+        proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=log, stderr=log, text=True, start_new_session=True)
+        proc.stdin.write(fill_placeholders(sql))
+        proc.stdin.close()
+        try:
+            rc = proc.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            return "started in the background; poll performance_schema.clone_status and clone_progress (STATE, ERROR_NO) and do not start another one"
+        log.flush()
+        with open(log.name) as fh:
+            text = redact(fh.read().strip(), [pw] if pw else [])
+        if rc:
+            raise Fail(text or "client exited %d" % rc)
+        return text or "finished"
+    finally:
+        log.close()
         if cnf and os.path.exists(cnf):
             os.unlink(cnf)
 
@@ -196,8 +270,13 @@ def q(prof, sql):
 
 # ---- statement checks -----------------------------------------------------------------------
 
+CLIENT_CMD = re.compile(r"(?im)^\s*(source|system|tee|pager|delimiter|connect)\b")
+
+
 def split_statements(sql):
     """Splits on ; outside quotes and strips comments. Plain scanner, no client-side parsing."""
+    if CLIENT_CMD.search(sql):
+        raise Fail("mysql client commands (source, system, tee, pager, delimiter, connect) are not allowed; write the statement on one line")
     out, cur, quote, i = [], [], None, 0
     while i < len(sql):
         c = sql[i]
@@ -223,6 +302,8 @@ def split_statements(sql):
         elif c == ";":
             out.append("".join(cur).strip())
             cur = []
+        elif c == "\\":
+            raise Fail("backslash commands of the mysql client (\\! \\. \\G ...) are not allowed")
         else:
             cur.append(c)
         i += 1
@@ -237,7 +318,15 @@ RO_BAD = re.compile(r"\binto\s+(outfile|dumpfile)\b|\bfor\s+update\b|\block\s+in
                     r"benchmark|load_file)\s*\(|\binto\s+@", re.I)
 
 
+SENSITIVE = re.compile(r"authentication_string|\bslave_master_info\b|\bglobal_priv\b|\bmysql\s*\.\s*user\b|\bshow\s+create\s+user\b|"
+                       r"\breplication_asynchronous_connection", re.I)
+
+
 def check_readonly(sql):
+    if "@@ENV:" in sql:
+        raise Fail("secret placeholders are not allowed in read-only queries")
+    if SENSITIVE.search(sql):
+        raise Fail("this reads account hashes or stored replication passwords; use audit-accounts, which never selects them")
     stmts = split_statements(sql)
     if len(stmts) != 1:
         raise Fail("query takes exactly one statement")
@@ -251,17 +340,61 @@ def check_readonly(sql):
     return s
 
 
+PRIVS = r"(?:replication\s+(?:slave|replica)|backup_admin|clone_admin|replica\s+monitor)"
+ACCT = r"'[\w.-]+'@'[\w.%:-]*'"
+REPL_SECRET = r"'@@ENV:(?:REPL|CLONE)[A-Z0-9_]*@@'"  # only replication/clone secrets may ever be sent to another server
 WRITE_OK = [re.compile(p, re.I) for p in (
-    r"^create\s+user\s+(if\s+not\s+exists\s+)?'?[\w.-]+'?@'[^']*'\s+identified\s+(with\s+\w+\s+)?by\s+'@@ENV:[A-Z0-9_]+@@'",
-    r"^grant\s+(replication\s+(slave|replica)|backup_admin|clone_admin|replica\s+monitor)\b[\w\s,]*\s+on\s+\*\.\*\s+to\s+",
-    r"^change\s+(replication\s+source|master)\s+to\b",
-    r"^(start|stop)\s+(replica|slave)\s*$",
-    r"^reset\s+(replica|slave)\s*$",
-    r"^set\s+global\s+(gtid_purged|gtid_slave_pos|read_only|super_read_only|clone_valid_donor_list|gtid_strict_mode)\s*=",
-    r"^install\s+plugin\s+clone\s+soname\s+'mysql_clone\.so'\s*$",
-    r"^clone\s+instance\s+from\b",
+    r"^create\s+user\s+(?:if\s+not\s+exists\s+)?%s\s+identified\s+(?:with\s+\w+\s+)?by\s+%s(?:\s+require\s+ssl)?$" % (ACCT, REPL_SECRET),
+    r"^grant\s+%s(?:\s*,\s*%s)*\s+on\s+\*\.\*\s+to\s+%s$" % (PRIVS, PRIVS, ACCT),
+    r"^(?:start|stop)\s+(?:replica|slave)$",
+    r"^reset\s+(?:replica|slave)$",
+    r"^set\s+global\s+(?:gtid_purged|gtid_slave_pos|read_only|super_read_only|clone_valid_donor_list|gtid_strict_mode)"
+    r"\s*=\s*(?:on|off|[01]|'[^',;\\]*')$",
+    r"^install\s+plugin\s+clone\s+soname\s+'mysql_clone\.so'$",
+    r"^clone\s+instance\s+from\s+'[\w.-]+'@'[\w.-]+':\d+\s+identified\s+by\s+%s(?:\s+data\s+directory\s*=\s*'[^']+')?"
+    r"(?:\s+require\s+(?:no\s+)?ssl)?$" % REPL_SECRET,
 )]
+CHANGE_RX = re.compile(r"^change\s+(?:replication\s+source|master)\s+to\s+(.+)$", re.I | re.S)
+CHANGE_KEYS = {"source_host": "host", "master_host": "host", "source_user": "user", "master_user": "user",
+               "source_password": "password", "master_password": "password", "source_port": "port", "master_port": "port",
+               "source_connect_retry": "connect_retry", "master_connect_retry": "connect_retry", "source_retry_count": "retry_count",
+               "source_auto_position": "auto_position", "master_use_gtid": "use_gtid", "source_ssl": "ssl", "master_ssl": "ssl",
+               "source_heartbeat_period": "heartbeat_period", "get_source_public_key": "public_key"}
+CHANGE_OPT = {
+    "host": r"'[A-Za-z0-9._:-]+'", "user": r"'[\w.-]+'", "password": REPL_SECRET, "port": r"\d+", "connect_retry": r"\d+",
+    "retry_count": r"\d+", "auto_position": r"[01]", "ssl": r"[01]", "use_gtid": r"(?:slave_pos|current_pos)",
+    "heartbeat_period": r"[\d.]+", "public_key": r"[01]",
+}
 NEVER = re.compile(r"\b(drop|truncate|delete|update|insert|alter|rename|purge)\b|reset\s+(binary|master|replica\s+all|slave\s+all)", re.I)
+
+
+def split_commas(text):
+    parts, cur, quote = [], [], None
+    for c in text:
+        if quote:
+            quote = None if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        elif c == ",":
+            parts.append("".join(cur).strip())
+            cur = []
+            continue
+        cur.append(c)
+    parts.append("".join(cur).strip())
+    return parts
+
+
+def check_change(s):
+    """CHANGE REPLICATION SOURCE / CHANGE MASTER with only known options and safe values. False if s is not one."""
+    m = CHANGE_RX.match(s)
+    if not m:
+        return False
+    for part in split_commas(m.group(1)):
+        k, _, v = part.partition("=")
+        key = CHANGE_KEYS.get(k.strip().lower())
+        if key is None or not re.fullmatch(CHANGE_OPT[key], v.strip(), re.I):
+            raise Fail("CHANGE option or value not allowed: %.60s" % part)
+    return True
 
 
 def check_write(sql):
@@ -272,10 +405,10 @@ def check_write(sql):
         head = re.sub(r"'(?:[^'\\]|\\.|'')*'", "''", s)  # ignore text inside literals
         if NEVER.search(head):
             raise Fail("destructive statement refused; the user runs it by hand: %.60s" % s)
-        if not any(rx.match(s) for rx in WRITE_OK):
-            raise Fail("statement not in the replication-setup allowlist: %.60s" % s)
-        if re.search(r"(source|master)_password\s*=\s*'(?!@@ENV:)|identified\s+(with\s+\w+\s+)?by\s+'(?!@@ENV:)", s, re.I):
-            raise Fail("literal password refused; use '@@ENV:NAME@@'")
+        if re.search(r"(source|master)_password\s*=\s*['\"](?!@@ENV:)|identified\s+(with\s+\w+\s+)?by\s+['\"](?!@@ENV:)", s, re.I):
+            raise Fail("literal password refused; use '@@ENV:NAME@@' with a REPL_ or CLONE_ secret")
+        if not (check_change(s) or any(rx.match(s) for rx in WRITE_OK)):
+            raise Fail("statement not in the replication-setup allowlist (or a value is not allowed): %.60s" % s)
     return stmts
 
 
@@ -299,7 +432,7 @@ def supported(flavor, ver):
 VARS = ("server_id", "log_bin", "binlog_format", "gtid_mode", "enforce_gtid_consistency", "gtid_strict_mode",
         "read_only", "super_read_only", "datadir", "innodb_buffer_pool_size", "max_connections", "sql_mode",
         "character_set_server", "innodb_flush_log_at_trx_commit", "sync_binlog", "log_replica_updates",
-        "log_slave_updates", "binlog_expire_logs_seconds", "innodb_page_size", "version_compile_os")
+        "log_slave_updates", "binlog_expire_logs_seconds", "expire_logs_days", "server_uuid", "innodb_page_size", "version_compile_os")
 
 
 def variables(prof):
@@ -335,20 +468,18 @@ def pick(d, *names):
     return None
 
 
-def replica_status(prof, max_lag=30):
-    out = run_sql(prof, "SHOW REPLICA STATUS")
-    rs = rows(out)
-    if not rs:
-        return {"role": "not a replica", "verdict": "NONE", "problems": []}
-    d = rs[0]
+ORDER = {"NONE": 0, "OK": 1, "LAGGING": 2, "BROKEN": 3}
+
+
+def status_one(d, max_lag):
     io = pick(d, "Replica_IO_Running", "Slave_IO_Running")
     sq = pick(d, "Replica_SQL_Running", "Slave_SQL_Running")
     lag = pick(d, "Seconds_Behind_Source", "Seconds_Behind_Master")
     err = " | ".join(e for e in (pick(d, "Last_IO_Error"), pick(d, "Last_SQL_Error"), pick(d, "Last_Error")) if e)
-    res = {"source": pick(d, "Source_Host", "Master_Host"), "io": io, "sql": sq, "lag": lag, "errors": err,
-           "gtid": pick(d, "Auto_Position") or pick(d, "Using_Gtid"),
-           "retrieved": pick(d, "Retrieved_Gtid_Set"), "executed": pick(d, "Executed_Gtid_Set"),
-           "sql_state": pick(d, "Replica_SQL_Running_State", "Slave_SQL_Running_State")}
+    res = {"channel": pick(d, "Channel_Name", "Connection_name") or "", "source": pick(d, "Source_Host", "Master_Host"),
+           "io": io, "sql": sq, "lag": lag, "errors": err, "gtid": pick(d, "Auto_Position") or pick(d, "Using_Gtid"),
+           "retrieved": pick(d, "Retrieved_Gtid_Set"), "executed": pick(d, "Executed_Gtid_Set"), "io_pos": pick(d, "Gtid_IO_Pos"),
+           "sql_state": pick(d, "Replica_SQL_Running_State", "Slave_SQL_Running_State"), "_raw": d}
     problems = []
     if io != "Yes":
         problems.append("IO thread is %s" % io)
@@ -365,6 +496,19 @@ def replica_status(prof, max_lag=30):
     res["problems"] = problems
     res["verdict"] = "OK" if not problems else ("BROKEN" if io != "Yes" or sq != "Yes" or err else "LAGGING")
     return res
+
+
+def replica_status(prof, max_lag=30):
+    """The worst channel decides; with several channels every problem is named after its channel."""
+    rs = rows(run_sql(prof, "SHOW REPLICA STATUS"))
+    if not rs:
+        return {"role": "not a replica", "verdict": "NONE", "problems": []}
+    results = [status_one(d, max_lag) for d in rs]
+    worst = max(results, key=lambda r: ORDER[r["verdict"]])
+    if len(results) > 1:
+        worst["problems"] = ["[channel %r] %s" % (r["channel"], p) for r in results for p in r["problems"]]
+        worst["channels"] = len(results)
+    return worst
 
 
 # ---- inspect --------------------------------------------------------------------------------
@@ -417,7 +561,7 @@ def inspect(prof):
 METHODS = {"mysql": ("xtrabackup", "clone", "dump"), "percona": ("xtrabackup", "clone", "dump"), "mariadb": ("mariabackup", "dump")}
 
 
-def blockers_for(src, rep, method):
+def blockers_for(src, rep, method, rep_state=None, rebuild=False):
     b = []
     for who, f in (("source", src), ("replica", rep)):
         if not f["supported"]:
@@ -439,35 +583,61 @@ def blockers_for(src, rep, method):
         b.append("source gtid_mode is %s; it must be ON (enable it in steps, online)" % sv.get("gtid_mode"))
     if sv.get("server_id") == rv.get("server_id"):
         b.append("server_id is %s on both; the replica needs its own" % sv.get("server_id"))
+    if sv.get("server_uuid") and sv.get("server_uuid") == rv.get("server_uuid"):
+        b.append("both servers have server_uuid %s (a copied auto.cnf); the replica needs its own" % sv["server_uuid"])
+    if method in ("clone", "xtrabackup", "mariabackup"):
+        for k in ("innodb_page_size", "version_compile_os"):
+            if sv.get(k) and rv.get(k) and sv[k] != rv[k]:
+                b.append("%s differs (%s on the source, %s on the replica); a physical copy needs the same" % (k, sv[k], rv[k]))
+    if method in ("clone", "dump") and rep["flavor"] != "mariadb" and rv.get("gtid_mode") != "ON":
+        b.append("replica gtid_mode is %s; set gtid_mode=ON and enforce_gtid_consistency=ON in its my.cnf and restart before %s" % (rv.get("gtid_mode"), method))
+    st = rep_state or {}
+    if st.get("replicas"):
+        b.append("%d server(s) replicate from the target replica; rebuilding it would break them" % st["replicas"])
+    if not rebuild:
+        if rep["data_bytes"] > 1 << 20:
+            b.append("the target already holds %s of user data and this plan REPLACES it; check that --source and --replica are not swapped, "
+                     "then pass --rebuild once the user agreed" % human(rep["data_bytes"]))
+        if st.get("verdict") in ("OK", "LAGGING"):
+            b.append("the target is already replicating (%s); pass --rebuild only if the user wants it rebuilt" % st["verdict"])
+        if st.get("verdict") == "NONE" and st.get("read_only") in ("0", "OFF") and rep["data_bytes"] > 1 << 20:
+            b.append("the target is writable and is not a replica: it looks like a primary")
     return b
 
 
-def runbook(src, rep, method, sp, rp):
+def runbook(src, rep, method, sp, rp, hosts=("<source_host>", "<replica_host>")):
     mdb = src["flavor"] == "mariadb"
-    size = human(src["data_bytes"])
-    A = "[CONFIRM]"
-    steps = ["Source %s %s, replica %s %s. Data to copy: about %s (plus logs). Free at least twice that on the backup and replica disks." % (
-        src["flavor"], src["version"], rep["flavor"], rep["version"], size),
-        "Replication user on the source (your secret REPL_PW first: ! mysql-tool secret-gen REPL_PW):\n"
-        "   mysql-tool exec %s \"CREATE USER 'repl'@'<replica_ip>' IDENTIFIED BY '@@ENV:REPL_PW@@'\"\n"
-        "   mysql-tool exec %s \"GRANT REPLICATION SLAVE ON *.* TO 'repl'@'<replica_ip>'\"  %s" % (sp, sp, A)]
     cli = "mariadb-backup" if mdb else "xtrabackup"
+    A = "[CONFIRM]"
+    sv = src["vars"]
+    keep = "binlog_expire_logs_seconds=%s" % sv.get("binlog_expire_logs_seconds") if sv.get("binlog_expire_logs_seconds") else "expire_logs_days=%s" % sv.get("expire_logs_days")
+    cnf = "[replica host] my.cnf: unique server_id (not %s), log_bin, %s, read_only=ON%s, skip_replica_start=ON" % (
+        sv.get("server_id"), "gtid_strict_mode=ON" if mdb else "gtid_mode=ON + enforce_gtid_consistency=ON", "" if mdb else ", super_read_only=ON")
+    steps = [
+        "Confirm the targets with the user before anything runs. SOURCE = %s (profile %s). NEW REPLICA = %s (profile %s), whose data will be REPLACED. "
+        "If the roles are swapped, stop here." % (hosts[0], sp, hosts[1], rp),
+        "%s %s, replica %s %s. Data to copy: about %s. Free at least twice that on the backup disk and on the replica. The source's binary logs must "
+        "cover backup, transfer and restore (%s now): do not purge them meanwhile or the replica fails with error 1236." % (
+            src["flavor"], src["version"], rep["flavor"], rep["version"], human(src["data_bytes"]), keep),
+        "Replication user on the source (secret first: ! mysql-tool secret-gen REPL_PW):\n"
+        "   mysql-tool exec %s \"CREATE USER 'repl'@'<replica_ip>' IDENTIFIED BY '@@ENV:REPL_PW@@' REQUIRE SSL\"\n"
+        "   mysql-tool exec %s \"GRANT REPLICATION SLAVE ON *.* TO 'repl'@'<replica_ip>'\"  %s" % (sp, sp, A)]
     if method in ("xtrabackup", "mariabackup"):
         steps += [
-            "[source host] backup (credentials in an option file with mode 600, never on the command line):\n"
-            "   %s --defaults-extra-file=<backup.cnf> --backup --target-dir=<backup_dir>   (and %s)" % (cli, "--slave-info --safe-slave-backup if the source is itself a replica"),
-            "[source host] prepare:  %s --prepare --target-dir=<backup_dir>" % cli,
+            "[source host] backup, via the tool so credentials stay out of argv (it also checks free space and the target):\n"
+            "   mysql-tool backup %s --method %s --target <backup_dir>  %s   (if the source is itself a replica add --slave-info --safe-slave-backup by hand)" % (sp, method, A),
+            "[source host] prepare:  %s --prepare --target-dir=<backup_dir>  %s" % (cli, A),
             "transfer to the replica host:  rsync -avP <backup_dir>/ <replica_host>:<backup_dir>/  %s" % A,
-            "[replica host] stop the server  %s ; move the old datadir aside  %s :\n"
-            "   systemctl stop <service> ; mv <datadir> <datadir>.old-<date>" % (A, A),
-            "[replica host] restore  %s :  %s --%s --target-dir=<backup_dir> ; chown -R mysql:mysql <datadir>" % (
-                A, cli, "copy-back" if mdb else "move-back"),
-            "[replica host] my.cnf: unique server_id (not %s), log_bin, %s, read_only=ON%s, skip_replica_start=ON ; start the server  %s" % (
-                src["vars"].get("server_id"), "gtid_strict_mode=ON" if mdb else "gtid_mode=ON + enforce_gtid_consistency=ON",
-                "" if mdb else ", super_read_only=ON", A),
+            "[replica host] stop the server:  systemctl stop <service>  %s" % A,
+            "[replica host] check it is really down before touching files:  systemctl is-active <service> must say inactive, and no mysqld/mariadbd process may run. If not, stop here.",
+            "[replica host] move the old datadir aside, never delete it:  mv <datadir> <datadir>.old-<date> && mkdir <datadir>  %s" % A,
+            "[replica host] restore with copy-back so the backup survives a retry:  %s --copy-back --target-dir=<backup_dir> --datadir=<datadir> ; chown -R mysql:mysql <datadir>  %s" % (cli, A),
+            cnf + " ; then start the server  %s" % A,
+            "[replica] it must have its own server_uuid: mysql-tool query %s \"SELECT @@server_uuid\" must differ from the source's (%s). "
+            "If equal: stop the server, mv <datadir>/auto.cnf aside, start it  %s" % (rp, sv.get("server_uuid") or "MariaDB has none", A),
         ]
         if mdb:
-            steps += ["[replica host] read the GTID from <datadir>/xtrabackup_binlog_info (third field), then:\n"
+            steps += ["[replica host] read the GTID from <datadir>/xtrabackup_binlog_info (third field; newer builds may name it mariadb_backup_binlog_info), then:\n"
                       "   mysql-tool exec %s \"SET GLOBAL gtid_slave_pos='<gtid>'\"  %s" % (rp, A)]
         else:
             steps += ["[replica] compare: mysql-tool query %s \"SELECT @@GLOBAL.gtid_executed\" with the GTID set in xtrabackup_binlog_info.\n"
@@ -475,20 +645,23 @@ def runbook(src, rep, method, sp, rp):
                       "   Anything else: STOP. RESET BINARY LOGS AND GTIDS is not run by this tool; the user decides." % (rp, rp, A)]
     elif method == "clone":
         steps += [
+            cnf + " ; restart it BEFORE the clone  %s (clone does not copy my.cnf)" % A,
             "Both servers: mysql-tool exec <profile> \"INSTALL PLUGIN clone SONAME 'mysql_clone.so'\"  %s (check SHOW PLUGINS first)" % A,
-            "Clone accounts: BACKUP_ADMIN on the donor, CLONE_ADMIN on the recipient, in the same way as step 2. Use a secret CLONE_PW.",
+            "Clone accounts: BACKUP_ADMIN on the donor, CLONE_ADMIN on the recipient, as in step 3, with a secret CLONE_PW.",
             "Recipient: mysql-tool exec %s \"SET GLOBAL clone_valid_donor_list='<source_host>:3306'\"  %s" % (rp, A),
-            "Recipient: this ERASES the recipient's data and restarts it under a supervisor (systemd)  %s :\n"
+            "Recipient: this ERASES the recipient's data and restarts it under a supervisor (systemd). It runs for minutes to hours; the tool starts it in the background  %s :\n"
             "   mysql-tool exec %s \"CLONE INSTANCE FROM 'clone_user'@'<source_host>':3306 IDENTIFIED BY '@@ENV:CLONE_PW@@' REQUIRE SSL\"" % (A, rp),
-            "Wait for the restart; check performance_schema.clone_status (STATE = 'Completed'). The recipient's accounts are now the donor's.",
+            "Poll until done: mysql-tool query %s \"SELECT STATE, ERROR_NO, ERROR_MESSAGE FROM performance_schema.clone_status\" (Completed). Do not start a second clone. "
+            "The recipient's accounts are now the donor's; its server_uuid must still differ." % rp,
         ]
     else:
         d = ("mariadb-dump --single-transaction --master-data=2 --gtid --routines --events --triggers --all-databases"
              if mdb else "mysqldump --single-transaction --source-data=2 --set-gtid-purged=ON --routines --events --triggers --all-databases")
-        steps += ["[source host] dump (small and medium data only; it is slow to restore):\n   %s --defaults-extra-file=<dump.cnf> > <dump_file>" % d,
-                  "transfer the file, then restore on the replica  %s :  mysql --defaults-extra-file=<replica.cnf> < <dump_file>" % A]
+        steps += [cnf + " ; restart it  %s" % A,
+                  "[source host] dump (small and medium data only; it is slow to restore):  mysql-tool backup %s --method dump --target <backup_dir>  %s   (runs: %s)" % (sp, A, d),
+                  "transfer <backup_dir>/dump.sql, then restore on the replica  %s :  mysql --defaults-extra-file=<replica.cnf> < dump.sql" % A]
         if mdb:
-            steps += ["read the CHANGE MASTER line or gtid in the dump header; mysql-tool exec %s \"SET GLOBAL gtid_slave_pos='<gtid>'\"  %s" % (rp, A)]
+            steps += ["read the gtid in the dump header; mysql-tool exec %s \"SET GLOBAL gtid_slave_pos='<gtid>'\"  %s" % (rp, A)]
     if mdb:
         steps += ["[replica] point it at the source:\n   mysql-tool exec %s \"CHANGE MASTER TO MASTER_HOST='<source_host>', MASTER_PORT=3306, MASTER_USER='repl', "
                   "MASTER_PASSWORD='@@ENV:REPL_PW@@', MASTER_USE_GTID=slave_pos, MASTER_SSL=1\"  %s\n   mysql-tool exec %s \"START REPLICA\"  %s" % (rp, A, rp, A)]
@@ -496,18 +669,33 @@ def runbook(src, rep, method, sp, rp):
         steps += ["[replica] point it at the source:\n   mysql-tool exec %s \"CHANGE REPLICATION SOURCE TO SOURCE_HOST='<source_host>', SOURCE_PORT=3306, SOURCE_USER='repl', "
                   "SOURCE_PASSWORD='@@ENV:REPL_PW@@', SOURCE_AUTO_POSITION=1, SOURCE_SSL=1\"  %s\n   mysql-tool exec %s \"START REPLICA\"  %s" % (rp, A, rp, A)]
     steps += ["Verify until lag is 0:  mysql-tool replica-status %s" % rp,
-              "Only then remove read_only if it should take writes (usually it must not), and keep the backup until the replica has run a day."]
-    return "\n".join("%d. %s" % (i, s) for i, s in enumerate(steps, 1))
+              "Keep read_only on the replica. Keep the backup and <datadir>.old-<date> until the replica has run a day and the user says to delete them."]
+    return "\n".join("%d. %s" % (i, x) for i, x in enumerate(steps, 1))
 
 
-def plan(sp, rp, method):
-    src, rep = facts(get_profile(sp)), facts(get_profile(rp))
-    b = blockers_for(src, rep, method)
-    out = ["# Replica plan: %s -> %s by %s" % (sp, rp, method), ""]
+def server_state(prof):
+    st = replica_status(prof)
+    n = 0
+    for stmt in ("SHOW REPLICAS", "SHOW REPLICA HOSTS", "SHOW SLAVE HOSTS"):
+        try:
+            n = len(rows(run_sql(prof, stmt)))
+            break
+        except Fail:
+            continue
+    ro = q(prof, "SELECT @@read_only AS ro")[0]["ro"]
+    return {"verdict": st["verdict"], "replicas": n, "read_only": ro}
+
+
+def plan(sp, rp, method, rebuild=False):
+    src_p, rep_p = get_profile(sp), get_profile(rp)
+    src, rep = facts(src_p), facts(rep_p)
+    b = blockers_for(src, rep, method, server_state(rep_p), rebuild)
+    hosts = ("%s:%s" % (src_p.get("host", "127.0.0.1"), src_p.get("port", 3306)), "%s:%s" % (rep_p.get("host", "127.0.0.1"), rep_p.get("port", 3306)))
+    out = ["# Replica plan: %s -> %s by %s" % (sp, rp, method), "", "mysql-tool means: python3 %s" % os.path.abspath(__file__), ""]
     if b:
         out += ["## Blockers (fix these first, no runbook until then)", ""] + ["- " + x for x in b]
     else:
-        out += ["Preflight passed. Steps marked [CONFIRM] need the user's yes before they run.", "", runbook(src, rep, method, sp, rp)]
+        out += ["Preflight passed. Steps marked [CONFIRM] need the user's yes before they run.", "", runbook(src, rep, method, sp, rp, hosts)]
     return "\n".join(out) + "\n", not b
 
 
@@ -579,8 +767,8 @@ ACCOUNT_COLS = ("plugin", "ssl_type", "Super_priv", "Grant_priv", "File_priv", "
 
 
 def account_rows(prof):
-    have = {r["column_name"].lower(): r["column_name"] for r in q(
-        prof, "SELECT column_name FROM information_schema.columns WHERE table_schema='mysql' AND table_name='user'")}
+    have = {r["c"].lower(): r["c"] for r in q(
+        prof, "SELECT column_name AS c FROM information_schema.columns WHERE table_schema='mysql' AND table_name='user'")}
     cols = [have[c.lower()] for c in ACCOUNT_COLS if c.lower() in have]
     sel = ", ".join(["User", "Host"] + cols)  # never the password or hash columns
     return q(prof, "SELECT %s FROM mysql.user" % sel)
@@ -607,8 +795,8 @@ def audit_accounts(rs):
 
 
 SECRET_PATTERNS = [
-    ("password in a config line", re.compile(r"(?i)^\s*(password|pwd)\s*=\s*(?!@@ENV:)\S+")),
-    ("password on a command line", re.compile(r"(?i)\b(mysql\w*|mariadb\w*|xtrabackup|mariabackup)\b.*\s(-p\S+|--password=\S+)")),
+    ("password in a config line", re.compile(r"(?i:^\s*(password|pwd))\s*=\s*(?!@@ENV:)\S+")),
+    ("password on a command line", re.compile(r"(?i:\b(mysql\w*|mariadb\w*|xtrabackup|mariabackup)\b).*\s(?:-p\S+|(?i:--password=)\S+)")),
     ("MYSQL_PWD value", re.compile(r"MYSQL_PWD=\S+")),
     ("literal password in SQL", re.compile(r"(?i)(identified\s+(with\s+\w+\s+)?by|(source|master)_password\s*=)\s*'(?!@@ENV:)[^']+'")),
 ]
@@ -738,7 +926,8 @@ def upgrade_findings(flavor, ver, explicit, accounts, spatial):
     if ver[:2] >= (8, 4):
         return [("info", "Already on %d.%d; nothing to check for 8.0 to 8.4." % ver[:2])]
     if ver[:2] != (8, 0):
-        return [("warn", "%d.%d is not an upgrade source for 8.4; the supported path is 8.0 to 8.4 (confirm in the MySQL 'Upgrade Paths' page)" % ver[:2])]
+        return [("warn", "%d.%d is not covered by this tool's 8.0 to 8.4 rules; confirm the path in the MySQL 'Upgrade Paths' page "
+                         "(5.7 has to go through 8.0 first)" % ver[:2])]
     out = [("warn", "variable %s is set explicitly and was removed in 8.4: the server will not start with it" % n) for n in REMOVED_84 if n in explicit]
     out += [("warn", "%d account(s) use mysql_native_password, which is not enabled by default in 8.4 (re-enable with mysql_native_password=ON or move them to caching_sha2_password)" % accounts)] if accounts else []
     out += [("warn", "%d spatial index(es): for 8.4.4 and later, drop them before the upgrade and recreate them after" % spatial)] if spatial else []
@@ -764,8 +953,8 @@ def upgrade_check(prof):
 # ---- monitor --------------------------------------------------------------------------------
 
 def monitor_one(name, max_lag=30, max_conn_pct=85):
-    prof = get_profile(name)
     try:
+        prof = get_profile(name)
         r = q(prof, "SELECT VERSION() AS v, @@version_comment AS c, @@max_connections AS mc, @@read_only AS ro")[0]
         st = {x["Variable_name"]: x["Value"] for x in q(prof, "SHOW GLOBAL STATUS WHERE Variable_name IN ('Uptime','Threads_connected')")}
         rs = replica_status(prof, max_lag)
@@ -791,11 +980,11 @@ def diagnose(rep, src):
     if r["verdict"] == "LAGGING":
         return "LAGGING", ["Replication runs but is behind: %s" % "; ".join(r["problems"]),
                            "Look for long transactions on the source, tables without primary key (/dynamia-mysql:inspect), a slow replica disk, and /dynamia-mysql:performance on the replica."]
-    st = rows(run_sql(rep, "SHOW REPLICA STATUS"))[0]
+    st = r["_raw"]
     io_no, sql_no = int(st.get("Last_IO_Errno") or 0), int(st.get("Last_SQL_Errno") or st.get("Last_Errno") or 0)
     text = r["errors"].lower()
     if io_no == 1236 or "purged" in text:
-        return "REBUILD", ["The source no longer has the binary logs this replica needs (error 1236 or purged logs).",
+        return "REBUILD", ["The IO thread stopped on error 1236: the source no longer has the binary logs this replica needs, or the replica has GTIDs the source does not have.",
                            "Rebuild it with /dynamia-mysql:replica-setup. Skipping or editing positions would lose or duplicate data."]
     if io_no in (1045, 1130, 2002, 2003, 2013, 2026) or (r["io"] != "Yes" and not sql_no):
         return "CONNECTION", ["The IO thread cannot reach or log in to the source (error %s): %s" % (io_no, r["errors"] or "no message"),
@@ -810,13 +999,16 @@ def diagnose(rep, src):
             return "ERRANT", steps + ["The replica has transactions the source never had (errant GTIDs): %s" % errant,
                                       "Someone wrote on the replica. Find out who (keep read_only and super_read_only ON). Safest fix is a rebuild with /dynamia-mysql:replica-setup. "
                                       "Injecting empty transactions hides the divergence; only the user may decide that."]
-    return "DIVERGED", steps + ["No errant GTIDs found, so the data differs without a GTID trace (a row changed or missing).",
-                                "Do not skip the transaction. Compare the table with the source, repair that table by hand, or rebuild the replica."]
+        steps.append("No errant GTIDs found, so the data differs without a GTID trace (a row changed or missing).")
+    else:
+        steps.append("The errant-GTID check is not available on MariaDB; replica position %s, source position %s. Compare them by hand." % (
+            gtid_executed(rep, fl), gtid_executed(src, fl)))
+    return "DIVERGED", steps + ["Do not skip the transaction. Compare the table with the source, repair that table by hand, or rebuild the replica."]
 
 
 # ---- failover plan --------------------------------------------------------------------------
 
-def failover_blockers(cand, status, old_gtid, cand_gtid, missing, old_alive, flavor):
+def failover_blockers(cand, status):
     b = []
     if status["verdict"] == "NONE":
         b.append("the candidate is not a replica")
@@ -826,61 +1018,82 @@ def failover_blockers(cand, status, old_gtid, cand_gtid, missing, old_alive, fla
         b.append("the candidate has the binary log off")
     if cand["vars"].get("log_replica_updates", cand["vars"].get("log_slave_updates")) in ("OFF", "0"):
         b.append("the candidate does not log replicated updates (log_replica_updates), so other replicas cannot follow it")
-    if old_alive:
-        if flavor == "mariadb":
-            if old_gtid != cand_gtid:
-                b.append("candidate position %s differs from the source %s" % (cand_gtid, old_gtid))
-        elif missing:
-            b.append("the candidate lacks these transactions of the source: %s" % missing)
     return b
 
 
-def failover_runbook(flavor, old_alive, cand, others):
+def failover_runbook(flavor, old_alive, cand, others, status=None, old_gtid=""):
     mdb = flavor == "mariadb"
-    chg = ("CHANGE MASTER TO MASTER_HOST='<new_host>', MASTER_USE_GTID=slave_pos" if mdb
-           else "CHANGE REPLICATION SOURCE TO SOURCE_HOST='<new_host>', SOURCE_AUTO_POSITION=1")
+    status = status or {}
+    A = "[CONFIRM]"
+    host = "<new_host>"
+    chg = ("CHANGE MASTER TO MASTER_HOST='%s', MASTER_USE_GTID=slave_pos" % host if mdb
+           else "CHANGE REPLICATION SOURCE TO SOURCE_HOST='%s', SOURCE_AUTO_POSITION=1" % host)
+    back = ("CHANGE MASTER TO MASTER_HOST='%s', MASTER_USER='repl', MASTER_PASSWORD='@@ENV:REPL_PW@@', MASTER_USE_GTID=slave_pos" % host if mdb
+            else "CHANGE REPLICATION SOURCE TO SOURCE_HOST='%s', SOURCE_USER='repl', SOURCE_PASSWORD='@@ENV:REPL_PW@@', SOURCE_AUTO_POSITION=1" % host)
+    retrieved = (status.get("io_pos") if mdb else status.get("retrieved")) or ""
+    retrieved = retrieved.replace("\\n", "").replace("\n", "").replace(" ", "")
+    drain = ("mysql-tool query %s \"SELECT MASTER_GTID_WAIT('%s', 60)\"" if mdb else "mysql-tool query %s \"SELECT WAIT_FOR_EXECUTED_GTID_SET('%s', 60)\"") % (cand, retrieved)
     s = []
     if old_alive:
-        s.append("[old source] stop writes: mysql-tool exec <old> \"SET GLOBAL read_only=ON\" then %s  [CONFIRM]\n   Tell the applications first; kill nothing without the user." %
-                 ("nothing more" if mdb else "mysql-tool exec <old> \"SET GLOBAL super_read_only=ON\""))
-        s.append("[candidate] wait until it has everything:\n   %s" % (
+        s.append("[old source] stop writes: mysql-tool exec <old> \"SET GLOBAL read_only=ON\"%s  %s\n   Tell the applications first; kill nothing without the user." % (
+            "" if mdb else " then \"SET GLOBAL super_read_only=ON\"", A))
+        s.append("[candidate] wait until it has everything the old source committed:\n   %s   (0 means caught up; anything else: stop)" % (
             "compare gtid_current_pos on both until equal" if mdb else
-            "mysql-tool query %s \"SELECT WAIT_FOR_EXECUTED_GTID_SET('<old gtid_executed>', 30)\"   (0 = caught up)" % cand))
+            "mysql-tool query %s \"SELECT WAIT_FOR_EXECUTED_GTID_SET('%s', 60)\"" % (cand, old_gtid)))
     else:
-        s.append("The old source is DOWN. Anything it committed and had not sent is lost. Do not continue unless the user accepts that, in words.")
-    s += ["[candidate] mysql-tool exec %s \"STOP REPLICA\"  [CONFIRM]" % cand,
+        s.append("FENCE the old source before anything else, so it cannot take writes if it comes back: power it off, stop mysqld, or remove its virtual IP / firewall it. "
+                 "This is done by the user, outside this tool  %s . Anything it committed and had not sent is lost; do not continue unless the user accepts that, in words." % A)
+    s.append("[candidate] let the SQL thread apply what the IO thread already fetched (STOP/RESET would discard those relay logs):\n   %s   (0 or 1 for MariaDB means done; -1 timeout: wait more)" % (
+        drain if retrieved else "nothing was retrieved beyond what is applied; check SHOW REPLICA STATUS yourself"))
+    s += ["[candidate] mysql-tool exec %s \"STOP REPLICA\"  %s" % (cand, A),
           "[candidate] the user runs by hand (destructive, this tool refuses it): RESET REPLICA ALL",
-          "[candidate] open for writes: mysql-tool exec %s \"SET GLOBAL read_only=OFF\"  [CONFIRM]%s" % (cand, "" if mdb else "   (and super_read_only=OFF)")]
+          "[candidate] the promotion must survive a restart: edit its my.cnf to remove read_only / super_read_only (a restart would otherwise make it read-only again)  %s" % A,
+          "[candidate] open for writes: mysql-tool exec %s \"SET GLOBAL read_only=OFF\"  %s%s" % (cand, A, "" if mdb else "   (and \"SET GLOBAL super_read_only=OFF\")")]
     for o in others:
-        s.append("[%s] mysql-tool exec %s \"STOP REPLICA\" ; \"%s\" ; \"START REPLICA\"  [CONFIRM each]" % (o, o, chg))
+        s.append("[%s] mysql-tool exec %s \"STOP REPLICA\" ; \"%s\" ; \"START REPLICA\"  %s each" % (o, o, chg, A))
     if old_alive:
-        s.append("[old source] make it a replica of the candidate and keep it read_only: same CHANGE statement with SOURCE_USER and SOURCE_PASSWORD='@@ENV:REPL_PW@@'  [CONFIRM]")
+        s.append("[old source] make it a replica of the candidate and keep it read_only (also in its my.cnf): \"%s\" ; \"START REPLICA\"  %s" % (back, A))
     s += ["The user repoints the applications (DNS, proxy, connection strings).",
           "Verify every replica: mysql-tool replica-status <profile>. Keep the old source untouched until it is understood."]
     return "\n".join("%d. %s" % (i, x) for i, x in enumerate(s, 1))
 
 
-def plan_failover(cand_name, old_name, other_names):
+def plan_failover(cand_name, old_name, other_names, source_down=False):
     cand_p = get_profile(cand_name)
     cand = facts(cand_p)
     status = replica_status(cand_p)
     fl = cand["flavor"]
-    old_alive, old_gtid, missing = False, "", ""
-    if old_name:
-        try:
-            old_p = get_profile(old_name)
-            old_gtid = gtid_executed(old_p, fl)
-            old_alive = True
-        except Fail:
-            pass
+    old_gtid, old_alive = "", not source_down
+    if source_down:
+        if old_name:
+            try:
+                q(get_profile(old_name), "SELECT 1 AS x")
+            except Fail:
+                pass
+            else:
+                raise Fail("%s answers, so it is not down; omit --source-down for a switchover" % old_name)
+    else:
+        if not old_name:
+            raise Fail("give --old-source for a switchover, or --source-down for a failover (the old source is dead and may lose data)")
+        old_gtid = gtid_executed(get_profile(old_name), fl)  # any error stops the plan: never guess that a source is down
     cand_gtid = gtid_executed(cand_p, fl)
+    b, notes = failover_blockers(cand, status), []
+    for o in other_names:
+        if fl == "mariadb":
+            notes.append("compare gtid_current_pos of %s with the candidate's (%s) by hand: the tool cannot subtract MariaDB GTID sets" % (o, cand_gtid))
+            continue
+        ahead = clean_gtid(q(cand_p, "SELECT GTID_SUBTRACT('%s','%s') AS m" % (gtid_executed(get_profile(o), fl), cand_gtid))[0]["m"])
+        if ahead:
+            b.append("replica %s has transactions the candidate lacks (%s); promote %s instead, or the new primary loses them" % (o, ahead, o))
     if old_alive and fl != "mariadb":
-        missing = clean_gtid(q(cand_p, "SELECT GTID_SUBTRACT('%s','%s') AS m" % (old_gtid, cand_gtid))[0]["m"])
-    b = failover_blockers(cand, status, old_gtid, cand_gtid, missing, old_alive, fl)
-    out = ["# %s: %s promotes (%s)" % ("Switchover" if old_alive else "Failover", cand_name, fl), ""]
+        lag = clean_gtid(q(cand_p, "SELECT GTID_SUBTRACT('%s','%s') AS m" % (old_gtid, cand_gtid))[0]["m"])
+        notes.append("the candidate is behind the old source by %s; the wait step enforces catch-up once the source is read-only" % (lag or "nothing"))
+    out = ["# %s: %s promotes (%s)" % ("Switchover" if old_alive else "Failover", cand_name, fl), "",
+           "mysql-tool means: python3 %s" % os.path.abspath(__file__), ""]
     if b:
         return "\n".join(out + ["## Blockers", ""] + ["- " + x for x in b]) + "\n", False
-    return "\n".join(out + [failover_runbook(fl, old_alive, cand_name, other_names)]) + "\n", True
+    out += ["- " + n for n in notes] + [""] if notes else []
+    return "\n".join(out + [failover_runbook(fl, old_alive, cand_name, other_names, status, old_gtid)]) + "\n", True
 
 
 # ---- backup ---------------------------------------------------------------------------------
@@ -922,6 +1135,10 @@ def run_backup(name, method, target, dry_run=False):
     f = facts(prof)
     if method == "mariabackup" and f["flavor"] != "mariadb" or method == "xtrabackup" and f["flavor"] == "mariadb":
         raise Fail("%s does not fit a %s server" % (method, f["flavor"]))
+    if method != "dump":
+        datadir = f["vars"].get("datadir", "")
+        if not datadir or not os.path.isdir(datadir):
+            raise Fail("a physical backup must run on the database host; this machine has no %s (run it there, or use the dump method)" % (datadir or "datadir"))
     if os.path.exists(target) and (not os.path.isdir(target) or os.listdir(target)):
         raise Fail("target %s exists and is not an empty directory; backups never overwrite" % target)
     need = f["data_bytes"] * (1.1 if method != "dump" else 0.5)
@@ -934,16 +1151,13 @@ def run_backup(name, method, target, dry_run=False):
     if dry_run:
         return "dry run: %s of data, %s free, would write to %s" % (human(f["data_bytes"]), human(free), target)
     os.makedirs(target, mode=0o700, exist_ok=True)
+    os.chmod(target, 0o700)  # a dump holds account hashes: nobody else may read the folder
     pw = load_secrets().get(prof.get("secret", ""))
     if pw is None:
         raise Fail("profile %s needs a secret for backups" % name)
-    d = os.path.join(HOME(), "tmp")
-    os.makedirs(d, mode=0o700, exist_ok=True)
-    fd, cnf = tempfile.mkstemp(dir=d, suffix=".cnf")
+    cnf = write_cnf(pw)
     started = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write('[client]\npassword="%s"\n' % pw.replace("\\", "\\\\").replace('"', '\\"'))
         r = subprocess.run(backup_command(method, f["flavor"], prof, cnf, target), capture_output=True, text=True)
     finally:
         if os.path.exists(cnf):
@@ -959,6 +1173,10 @@ def run_backup(name, method, target, dry_run=False):
     with os.fdopen(fd, "w") as fh:
         json.dump(man, fh, indent=2)
     return "backup finished: %s, %s at %s" % (method, human(man["bytes"]), target)
+
+
+def first_existing(target, *names):
+    return next((os.path.join(target, n) for n in names if os.path.isfile(os.path.join(target, n))), None)
 
 
 def verify_backup(target):
@@ -981,8 +1199,8 @@ def verify_backup(target):
                 if b"Dump completed" not in fh.read():
                     problems.append("dump.sql does not end with 'Dump completed': it is truncated")
     else:
-        cp = os.path.join(target, "xtrabackup_checkpoints")
-        if not os.path.isfile(cp):
+        cp = first_existing(target, "xtrabackup_checkpoints", "mariadb_backup_checkpoints")
+        if not cp:
             problems.append("xtrabackup_checkpoints is missing")
         else:
             with open(cp) as fh:
@@ -990,7 +1208,7 @@ def verify_backup(target):
             man["state"] = kv.get("backup_type")
             if kv.get("backup_type") not in ("full-backuped", "full-prepared"):
                 problems.append("unexpected backup_type %r" % kv.get("backup_type"))
-        if not os.path.isfile(os.path.join(target, "xtrabackup_binlog_info")):
+        if not first_existing(target, "xtrabackup_binlog_info", "mariadb_backup_binlog_info"):
             problems.append("xtrabackup_binlog_info is missing (the replication position)")
         if dir_bytes(target) < man.get("bytes", 0) * 0.99:
             problems.append("the backup is smaller than when it was made")
@@ -1021,8 +1239,10 @@ def main(argv=None):
     p = sub.add_parser("exec"); p.add_argument("profile"); p.add_argument("sql")
     p = sub.add_parser("plan-replica"); p.add_argument("--source", required=True); p.add_argument("--replica", required=True)
     p.add_argument("--method", required=True, choices=("xtrabackup", "mariabackup", "clone", "dump"))
+    p.add_argument("--rebuild", action="store_true", help="the replica may hold data that will be replaced (only after the user agreed)")
     p = sub.add_parser("diagnose"); p.add_argument("replica"); p.add_argument("--source", required=True)
     p = sub.add_parser("plan-failover"); p.add_argument("--candidate", required=True); p.add_argument("--old-source"); p.add_argument("--other", action="append", default=[])
+    p.add_argument("--source-down", action="store_true", help="failover: the old source is dead, data it did not send is lost")
     p = sub.add_parser("backup"); p.add_argument("profile"); p.add_argument("--method", required=True, choices=("xtrabackup", "mariabackup", "dump"))
     p.add_argument("--target", required=True); p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("verify-backup"); p.add_argument("target")
@@ -1033,6 +1253,7 @@ def main(argv=None):
     p = sub.add_parser("monitor"); p.add_argument("profiles", nargs="+"); p.add_argument("--max-lag", type=int, default=30)
     p = sub.add_parser("scan-secrets"); p.add_argument("paths", nargs="*")
     a = ap.parse_args(argv)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))  # lets `finally` delete the temporary option file
     try:
         if a.cmd == "profiles":
             for n, pr in sorted(load_profiles().items()):
@@ -1057,6 +1278,7 @@ def main(argv=None):
             print(inspect(get_profile(a.profile)))
         elif a.cmd == "replica-status":
             r = replica_status(get_profile(a.profile), a.max_lag)
+            r = {k: v for k, v in r.items() if not k.startswith("_")}
             print(json.dumps(r, indent=2) if a.json else "%s\n%s" % (r["verdict"], "\n".join("- " + x for x in r["problems"])))
             return 0 if r["verdict"] in ("OK", "NONE") else 1
         elif a.cmd == "query":
@@ -1064,9 +1286,12 @@ def main(argv=None):
         elif a.cmd == "exec":
             prof = get_profile(a.profile)
             for s in check_write(a.sql):
-                print(redact(run_sql(prof, s, readonly=False)).strip() or "ok: %.40s" % re.sub(r"'[^']*'", "'..'", s))
+                if re.match(r"clone\s+instance", s, re.I):
+                    print(start_detached(prof, s))
+                else:
+                    print(redact(run_sql(prof, s, readonly=False, timeout=300)).strip() or "ok: %.40s" % re.sub(r"'[^']*'", "'..'", s))
         elif a.cmd == "plan-replica":
-            text, ok = plan(a.source, a.replica, a.method)
+            text, ok = plan(a.source, a.replica, a.method, a.rebuild)
             print(text)
             return 0 if ok else 1
         elif a.cmd == "diagnose":
@@ -1074,7 +1299,7 @@ def main(argv=None):
             print("%s\n%s" % (verdict, "\n".join("- " + x for x in lines)))
             return 0 if verdict in ("OK", "NONE") else 1
         elif a.cmd == "plan-failover":
-            text, ok = plan_failover(a.candidate, a.old_source, a.other)
+            text, ok = plan_failover(a.candidate, a.old_source, a.other, a.source_down)
             print(text)
             return 0 if ok else 1
         elif a.cmd == "backup":

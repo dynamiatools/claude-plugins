@@ -40,7 +40,7 @@ class AuditTest(unittest.TestCase):
         self.assertNotIn("'root'@'localhost'", text)
 
     def test_account_query_never_selects_hashes(self):
-        h = Home({"information_schema.columns": "column_name\nUser\nHost\nplugin\nauthentication_string\nPassword\nSuper_priv\n"})
+        h = Home({"information_schema.columns": "c\nUser\nHost\nplugin\nauthentication_string\nPassword\nSuper_priv\n"})
         try:
             tool.account_rows(tool.get_profile("src"))
             sql = h.calls()[-1]["sql"]
@@ -111,8 +111,9 @@ class UpgradeTest(unittest.TestCase):
 
     def test_other_sources(self):
         self.assertIn("Already on", tool.upgrade_findings("mysql", (8, 4, 3), [], 0, 0)[0][1])
-        self.assertIn("not an upgrade source", tool.upgrade_findings("mysql", (5, 7, 44), [], 0, 0)[0][1])
+        self.assertIn("not covered", tool.upgrade_findings("mysql", (5, 7, 44), [], 0, 0)[0][1])
         self.assertIn("No verified rule list", tool.upgrade_findings("mariadb", (10, 11, 6), [], 0, 0)[0][1])
+        self.assertIn("not covered", tool.upgrade_findings("mysql", (8, 2, 0), [], 0, 0)[0][1])
 
 
 class MonitorTest(unittest.TestCase):
@@ -175,21 +176,24 @@ class FailoverTest(unittest.TestCase):
 
     def test_blockers(self):
         ok = {"verdict": "OK", "problems": []}
-        self.assertEqual(tool.failover_blockers(self.cand(), ok, "g", "g", "", True, "mysql"), [])
-        b = tool.failover_blockers(self.cand(log_bin="OFF"), {"verdict": "NONE", "problems": []}, "g", "g", "uuid:1-5", True, "mysql")
-        self.assertEqual(len(b), 3)
-        b = tool.failover_blockers(self.cand(), ok, "0-1-10", "0-1-9", "", True, "mariadb")
-        self.assertIn("differs", b[0])
-        self.assertEqual(tool.failover_blockers(self.cand(), ok, "", "g", "", False, "mysql"), [])
+        self.assertEqual(tool.failover_blockers(self.cand(), ok), [])
+        b = tool.failover_blockers(self.cand(log_bin="OFF"), {"verdict": "NONE", "problems": []})
+        self.assertEqual(len(b), 2)
+        self.assertEqual(len(tool.failover_blockers(self.cand(log_replica_updates="OFF"), ok)), 1)
 
     def test_runbook_keeps_destructive_steps_manual(self):
         for alive in (True, False):
-            text = tool.failover_runbook("mysql", alive, "cand", ["rep2"])
+            text = tool.failover_runbook("mysql", alive, "cand", ["rep2"], {"retrieved": "aaaa-1111:1-9"}, "aaaa-1111:1-10")
             self.assertIn("the user runs by hand", text)
             self.assertNotIn("mysql-tool exec cand \"RESET", text)
             self.assertIn("[CONFIRM]", text)
-        self.assertIn("DOWN", tool.failover_runbook("mysql", False, "cand", []))
-        self.assertIn("MASTER_USE_GTID=slave_pos", tool.failover_runbook("mariadb", True, "cand", ["r"]))
+            self.assertIn("WAIT_FOR_EXECUTED_GTID_SET('aaaa-1111:1-9'", text)
+        self.assertIn("FENCE", tool.failover_runbook("mysql", False, "cand", []))
+        mdb = tool.failover_runbook("mariadb", True, "cand", ["r"], {"io_pos": "0-1-9"}, "0-1-10")
+        self.assertIn("MASTER_USE_GTID=slave_pos", mdb)
+        self.assertIn("MASTER_USER", mdb)
+        self.assertNotIn("SOURCE_USER", mdb)
+        self.assertIn("MASTER_GTID_WAIT('0-1-9'", mdb)
         with self.assertRaises(tool.Fail):
             tool.check_write("RESET REPLICA ALL")
 
@@ -198,8 +202,8 @@ class BackupTest(unittest.TestCase):
     def setUp(self):
         self.old_path = os.environ["PATH"]
         os.environ["PATH"] = FAKEBIN + os.pathsep + self.old_path
-        self.h = Home({**VER, "SHOW GLOBAL VARIABLES": "Variable_name\tValue\nserver_id\t1\n"})
         self.work = tempfile.TemporaryDirectory()
+        self.h = Home({**VER, "SHOW GLOBAL VARIABLES": "Variable_name\tValue\nserver_id\t1\ndatadir\t%s\n" % self.work.name})
 
     def tearDown(self):
         os.environ["PATH"] = self.old_path

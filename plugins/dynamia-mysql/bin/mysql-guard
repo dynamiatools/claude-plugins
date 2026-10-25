@@ -1,73 +1,132 @@
 #!/usr/bin/env python3
-"""PreToolUse hook (Bash, Read) for MySQL, Percona Server and MariaDB work.
+"""PreToolUse hook (Bash, Read, Grep) for MySQL, Percona Server and MariaDB work.
 
-Silent unless the command touches a MySQL-family tool or a datadir. Then:
-  deny  (exit 2)  a password in argv or SQL text, reading the secrets file, and destructive
-                  statements (DROP, TRUNCATE, DELETE/UPDATE without WHERE, RESET BINARY LOGS,
-                  PURGE BINARY LOGS, rm of a datadir)
-  ask   (JSON)    anything else that changes state: any write SQL, restart or stop of the server,
-                  moving or copying a datadir, restoring a dump or backup, CLONE, replication changes
+Silent unless the command touches a MySQL-family tool, a datadir or this plugin's private folder. Then:
+  deny  (exit 2)  a password in argv or SQL text, reading secrets or credential files, reading account
+                  hashes, and destructive statements (DROP, TRUNCATE, DELETE/UPDATE without WHERE,
+                  RESET BINARY LOGS, PURGE BINARY LOGS, recursive rm of a datadir)
+  ask   (JSON)    anything else that changes state: write SQL, SHUTDOWN, restart or stop of the server,
+                  moving or copying a datadir, restoring, backups, CLONE, replication changes, pt-* --execute
+Read-only mysql-tool subcommands skip the SQL rules because the tool enforces read-only itself.
 Fails open: any error means exit 0. It is a guard against mistakes, not a sandbox: a command built
-from pieces at run time can slip past a text match.
+from pieces at run time, an encoded string or a script file can slip past a text match.
 """
 import json
 import re
 import sys
 
 I = re.I
-RELEVANT = re.compile(r"(?<![\w-])(mysql\w*|mariadb\w*|mariabackup|xtrabackup|percona\w*|mysql-tool)(?![\w])"
-                      r"|/var/lib/(mysql|mariadb)|dynamia-mysql", I)
-READONLY_FIRST = {"git", "grep", "rg", "ls", "head", "man", "which", "type"}
-COMPOUND = re.compile(r"[|;&<>`]|\$\(")
-DATADIR = r"(/var/lib/(mysql|mariadb)|/var/lib/mysql-\w+|\bdatadir\b)"
+RELEVANT = re.compile(r"(?<![\w-])(mysql\w*|mariadb\w*|mariabackup|xtrabackup|percona\w*|pt-[\w-]+|mysqld\w*)(?![\w])"
+                      r"|/var/lib/(mysql|mariadb)|dynamia-mysql|mysql-tool", I)
+EXEMPT_FIRST = {"git", "grep", "rg", "ls", "head", "tail", "man", "which", "type", "cd", "pwd", "diff", "wc"}
+SAFE_SUBS = r"(?:query|inspect|info|replica-status|plan-replica|diagnose|plan-failover|audit-config|audit-accounts|slow-queries|locks|" \
+            r"schema-diff|upgrade-check|monitor|scan-secrets|profiles|secrets|verify-backup|secret-set|secret-gen)"
+SAFE_TOOL = re.compile(r"^\s*(?:python3?\s+)?(?:\S*/)?mysql-tool\s+" + SAFE_SUBS + r"\b")
+SPLIT = re.compile(r"&&|\|\||[;\n|]")
+REDIRECT = re.compile(r"[<>`]|\$\(")
+DATADIR = (r"(?:/var/lib/(?:mysql|mariadb)\S*|\S*/(?:mysql|mariadb)[\w-]*/(?:data|db)\S*|\S*mysql-?data\S*|\bdatadir\b)")
 
-DENY = [
-    (r"(?<![\w-])-p(?!\s|$)\S", "a password on the command line (-pSECRET)"),
-    (r"--password=\S", "a password on the command line (--password=...)"),
-    (r"\bMYSQL_PWD\s*=", "MYSQL_PWD in the command"),
-    (r"identified\s+(with\s+\w+\s+)?by\s+'(?!@@ENV:)", "a literal password in SQL (use '@@ENV:NAME@@')"),
-    (r"(source|master)_password\s*=\s*'(?!@@ENV:)", "a literal password in SQL (use '@@ENV:NAME@@')"),
+SECRET_DIR = re.compile(r"\.config/dynamia-mysql|dynamia-mysql/(?:secrets\.env|tmp)")
+BARE_SECRET = re.compile(r"^\s*(?:sudo\s+)?(?:cat|less|more|head|tail|bat|nl|xxd|od|strings|base64)\s+(?:-\S+\s+)*secrets\.env")
+TOOL_OK = re.compile(r"^\s*(?:python3?\s+)?(?:\S*/)?mysql-tool\s+(?:secret-set|secret-gen|secrets|profiles|scan-secrets)\b")
+CRED_FILES = re.compile(r"/etc/mysql|/etc/my\.cnf|(?:^|[\s/~])\.my\.cnf|mylogin\.cnf|debian\.cnf|\.mysql_history")
+READERS = re.compile(r"\b(?:cat|less|more|head|tail|grep|egrep|rg|awk|sed|strings|cp|base64|xxd|od|nl|bat|cut)\b")
+
+DENY_ARGV = [  # run on the command with quoted text blanked, so a quoted '-pX' inside SQL is not a password
+    (r"(?<![\w-])-p(?!\s|$)\S", "a password on the command line (-pSECRET)", 0),
+    (r"--password=\S", "a password on the command line (--password=...)", I),
+    (r"\bMYSQL_PWD\s*=", "MYSQL_PWD in the command", 0),
+]
+DENY_TEXT = [
+    (r"identified\s+(with\s+\w+\s+)?by\s+\\?['\"](?!@@ENV:)", "a literal password in SQL (use '@@ENV:NAME@@')"),
+    (r"(source|master)_password\s*=\s*\\?['\"](?!@@ENV:)", "a literal password in SQL (use '@@ENV:NAME@@')"),
+    (r"\bset\s+password\b.*?=\s*(?:password\s*\(\s*)?\\?['\"](?!@@ENV:)", "a literal password in SQL"),
+    (r"authentication_string|\bslave_master_info\b|\bglobal_priv\b|\bshow\s+create\s+user\b", "reading account hashes or stored replication passwords"),
+]
+DENY_SQL = [
     (r"\bdrop\s+(database|schema|table)\b", "DROP DATABASE/SCHEMA/TABLE"),
-    (r"\btruncate\b", "TRUNCATE"),
+    (r"\btruncate\b(?!\s*\()", "TRUNCATE"),
     (r"\breset\s+(binary\s+logs\s+and\s+gtids|master)\b", "RESET BINARY LOGS AND GTIDS / RESET MASTER"),
     (r"\bpurge\s+(binary|master)\s+logs\b", "PURGE BINARY LOGS"),
-    (r"\brm\s+(-\S+\s+)*\S*" + DATADIR, "removing a datadir"),
+    (r"\brm\s+(?:-\S+\s+)*\S*" + DATADIR, "removing a datadir"),
+    (r"\brm\b[^|;&]*\s-\S*[rR]\S*[^|;&]*(?:mysql|mariadb)", "recursive rm on a MySQL or MariaDB path"),
+    (r"\bfind\b[^|;&]*(?:mysql|mariadb)[^|;&]*-delete", "find -delete on a MySQL or MariaDB path"),
 ]
 ASK = [
-    (r"\b(systemctl|service)\b.*\b(restart|stop|start|reload|kill)\b|\bmysqladmin\b.*\b(shutdown|kill)\b",
+    (r"\b(systemctl|service)\b.*\b(restart|stop|start|reload|kill)\b|\bmysqladmin\b.*\b(shutdown|kill|stop-slave|start-slave)\b",
      "start, stop or restart of the server"),
+    (r"(?:^|[\s'\";])(?:shutdown|restart)\s*(?:;|['\"]|$)", "SHUTDOWN or RESTART statement"),
+    (r"\b(?:pkill|killall|kill)\b.*\b(?:mysqld\w*|mariadbd\w*)\b", "killing the server process"),
     (r"\b(mv|cp|rsync|chown|chmod|ln|tar|scp)\b.*" + DATADIR, "moving or changing a datadir"),
-    (r"--(copy|move)-back\b|\bmysqld\b.*--initialize|mysql_upgrade|mariadb-install-db", "restore or initialize a datadir"),
-    (r"\bmysql\w*\b[^|;&]*<\s*\S|\|\s*(mysql|mariadb)\b|(^|\s)(source|\\\.)\s+\S+\.sql", "restoring a dump into a server"),
+    (r"--(copy|move)-back\b|\bmysqld\b.*--initialize|mysql_upgrade|mariadb-install-db|mariadb-upgrade", "restore, initialize or upgrade a datadir"),
+    (r"\bmysql\w*\b[^|;&]*<\s*\S|\|\s*(mysql|mariadb)\b|(?:^|[\s'\";])(?:source|\\\.)\s+\S+", "restoring or running a file in a server"),
     (r"\bclone\s+instance\b|\binstall\s+plugin\b", "CLONE or plugin install"),
     (r"\b(stop|start)\s+(replica|slave)\b|\bchange\s+(replication\s+source|master)\s+to\b|\breset\s+(replica|slave)\b",
      "replication change"),
-    (r"\bset\s+(global|persist)\b", "SET GLOBAL / PERSIST"),
+    (r"\bset\s+(global|persist|persist_only)\b|\bset\s+@@(global|persist|persist_only)\b", "SET GLOBAL / PERSIST"),
+    (r"\bflush\b[^;]*\bwith\s+read\s+lock\b", "FLUSH ... WITH READ LOCK"),
     (r"\b(xtrabackup|mariabackup|mariadb-backup)\b.*--(backup|prepare)\b|\bmysql-tool\s+backup\b|\b(mysqldump|mariadb-dump)\b",
      "taking or preparing a backup (heavy I/O on the server, writes files)"),
-    (r"\b(create|alter|drop|rename)\s+(user|table|index|database|schema|view|trigger|event|procedure|function)\b"
+    (r"\bpt-(online-schema-change|table-sync|archiver|table-checksum|kill)\b.*--(execute|kill)|\bmysqlcheck\b.*--(repair|optimize|auto-repair)",
+     "a Percona Toolkit or mysqlcheck operation that changes data"),
+    (r"(?<!show\s)\b(create|alter|drop|rename)\s+(user|table|index|database|schema|view|trigger|event|procedure|function)\b"
      r"|\b(grant|revoke|insert|update|delete|replace|load\s+data|kill)\b\s", "SQL that changes data, schema or accounts"),
 ]
-SECRETS = re.compile(r"dynamia-mysql/secrets\.env|(^|/)secrets\.env$")
+
+
+def segments(cmd):
+    return [x for x in (s.strip() for s in SPLIT.split(cmd)) if x]
+
+
+def exempt(cmd):
+    segs = segments(cmd)
+    return bool(segs) and not REDIRECT.search(cmd) and all(x.split()[0] in EXEMPT_FIRST for x in segs)
+
+
+def read_only_tool(cmd):
+    segs = segments(cmd)
+    return bool(segs) and not REDIRECT.search(cmd) and all(SAFE_TOOL.match(x) for x in segs)
+
+
+def unfiltered_dml(cmd):
+    for m in re.finditer(r"\b(delete\s+from|(?<!on\s)(?<!for\s)update)\b([^;]*)", cmd, I):
+        if not re.search(r"\bwhere\b", m.group(2), I):
+            return True
+    return False
+
+
+def check_file(path):
+    if path and SECRET_DIR.search(path) and not path.endswith("profiles.toml"):
+        return "deny", ["reading this plugin's secrets or temporary files (the profiles file is fine to read)"]
+    if path and CRED_FILES.search(path):
+        return "deny", ["reading a MySQL credentials file (ask the user to check it)"]
+    return None
 
 
 def check(tool, ti):
-    if tool == "Read":
-        return ("deny", ["reading the secrets file"]) if SECRETS.search(ti.get("file_path", "")) else None
+    if tool in ("Read", "Grep"):
+        return check_file(ti.get("file_path") or ti.get("path") or "")
     cmd = ti.get("command", "")
-    if SECRETS.search(cmd) and "mysql-tool" not in cmd:
-        return "deny", ["reading the secrets file"]
-    if not RELEVANT.search(cmd):
+    if not cmd.strip():
         return None
-    first = cmd.split(None, 1)[0] if cmd.strip() else ""
-    if first in READONLY_FIRST and not COMPOUND.search(cmd):
+    if (SECRET_DIR.search(cmd) or BARE_SECRET.search(cmd)) and not (TOOL_OK.match(cmd) and not REDIRECT.search(cmd)):
+        return "deny", ["reading this plugin's secrets or temporary files (use the Read tool for profiles.toml)"]
+    if CRED_FILES.search(cmd) and READERS.search(cmd):
+        return "deny", ["reading a MySQL credentials file (ask the user to check it)"]
+    if not RELEVANT.search(cmd) or exempt(cmd):
         return None
-    deny = [why for rx, why in DENY if re.search(rx, cmd, 0 if rx.startswith("(?<![\\w-])-p") else I)]
-    if re.search(r"\b(delete\s+from|update)\b", cmd, I) and not re.search(r"\bwhere\b", cmd, I):
+    norm = re.sub(r"/\*.*?\*/", " ", cmd, flags=re.S)
+    bare = re.sub(r"'[^']*'|\"[^\"]*\"", "''", norm)
+    deny = [why for rx, why, fl in DENY_ARGV if re.search(rx, bare, fl)]
+    deny += [why for rx, why in DENY_TEXT if re.search(rx, norm, I)]
+    if read_only_tool(cmd):
+        return ("deny", deny) if deny else None
+    deny += [why for rx, why in DENY_SQL if re.search(rx, norm, I)]
+    if unfiltered_dml(norm):
         deny.append("DELETE or UPDATE without WHERE")
     if deny:
         return "deny", deny
-    ask = [why for rx, why in ASK if re.search(rx, cmd, I)]
+    ask = [why for rx, why in ASK if re.search(rx, norm, I)]
     return ("ask", ask) if ask else None
 
 

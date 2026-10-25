@@ -10,7 +10,8 @@ A backup nobody restored is a hope. This skill makes it, checks it, and restores
 ## Rules
 
 - **Taking a backup is a critical operation** (heavy I/O on the server, writes files, can lock). Say the method, host, target and window, and get a yes first. The guard hook asks as well.
-- Physical backups (`xtrabackup`, `mariabackup`) must run **on the database host**, where the datadir is. Logical dumps can run anywhere that reaches the server.
+- Physical backups (`xtrabackup`, `mariabackup`) must run **on the database host**, where the datadir is; the tool refuses when the server's datadir does not exist on this machine. Logical dumps can run anywhere that reaches the server. The target folder is created with mode 0700 (a dump holds account hashes).
+- Backups can take hours: run the command in the background, not in a foreground call that can time out. If a run is killed, the temporary option file is swept on the next start, and the target is not to be used.
 - The tool never overwrites: the target must not exist or must be empty. It refuses when free space is short (data size x 1.1 physical, x 0.5 dump). Credentials go in a temporary 0600 option file, never in argv or the output.
 
 ## Steps
