@@ -29,6 +29,7 @@ claude plugin install <plugin>@dynamia-tools
 | [`dynamia-docs`](plugins/dynamia-docs) | Docs: README and docs layout, ADRs, API docs, changelogs, runbooks, diagrams, docs audits. 7 skills, no hooks | `dynamia-docs@dynamia-tools` |
 | [`mcp-tool-chain`](plugins/mcp-tool-chain) | Chain many MCP tool calls in one short Python script so intermediate results stay out of the context; imports the stdio MCP servers it finds. 2 skills, an MCP server, no hooks | `mcp-tool-chain@dynamia-tools` |
 | [`dynamia-remix`](plugins/dynamia-remix) | Remix an app you admire into your own product, clean-room: map it, plan and rebuild it, score parity, read what its users hate, rebrand and sweep. 6 skills, 3 tools, no hooks | `dynamia-remix@dynamia-tools` |
+| [`dynamia-mysql`](plugins/dynamia-mysql) | MySQL, Percona and MariaDB (8.4+ / 10.11+): connect without leaking passwords, inspect, check replication, build a new replica, with a guard against destructive operations. 13 skills (connect, inspect, replicas, backup, failover, audit, performance, upgrade), 1 guard hook, a `mysql-tool` | `dynamia-mysql@dynamia-tools` |
 
 Each works on its own; they only point to each other as optional extras, and recommend installing the sibling when it is missing. Together they cover the workflow (`dynamia`), the way of working (`dynamia-craft`), the framework (`dynamia-platform`) and the interface (`dynamia-ui`).
 
