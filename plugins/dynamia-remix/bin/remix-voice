@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Rank what users complain about, from reviews you collected. Standard library only.
+
+    remix-voice remix/reviews.csv [--themes themes.json] [--out remix/voice.md]
+
+Columns: source, url, date (YYYY-MM-DD), rating (1-5), text. A row without an
+http(s) url is dropped: no link, no quote. Quotes are printed exactly as given.
+A theme with under 3 reviews or one source is marked thin. Weight is higher for
+low ratings and for reviews under a year old. No network access.
+"""
+import argparse
+import csv
+import datetime
+import json
+import sys
+
+THEMES = {
+    "price and billing": ["price", "pricing", "expensive", "subscription", "charged", "refund", "cancel", "per seat", "paywall"],
+    "bugs and crashes": ["bug", "crash", "broken", "freezes", "error", "doesn't work", "does not work", "lost my"],
+    "slow": ["slow", "lag", "laggy", "takes forever", "loading"],
+    "missing features": ["wish", "missing", "no way to", "can't", "cannot", "please add", "need a", "lacks"],
+    "support": ["support", "no reply", "no response", "customer service"],
+    "confusing to use": ["confusing", "hard to find", "unintuitive", "clunky", "complicated"],
+    "ads and privacy": ["ads", "tracking", "privacy", "spam", "data"],
+    "sync and reliability": ["sync", "offline", "lost data", "duplicate"],
+}
+
+
+def load(path):
+    kept, dropped = [], 0
+    with open(path, newline="", encoding="utf-8-sig") as fh:
+        for raw in csv.DictReader(fh):
+            row = {(k or "").strip().lower(): (v or "").strip() for k, v in raw.items()}
+            if not row.get("url", "").startswith(("http://", "https://")) or not row.get("text"):
+                dropped += 1
+                continue
+            kept.append(row)
+    return kept, dropped
+
+
+def weight(row, today):
+    try:
+        w = 6 - min(5, max(1, int(float(row.get("rating") or 3))))
+    except ValueError:
+        w = 3
+    try:
+        if (today - datetime.date.fromisoformat(row.get("date", ""))).days <= 365:
+            w *= 1.5
+    except ValueError:
+        pass
+    return w
+
+
+def rank(rows, themes, today=None):
+    today = today or datetime.date.today()
+    out = {}
+    for r in rows:
+        low = r["text"].lower()
+        for name, words in themes.items():
+            if any(w in low for w in words):
+                t = out.setdefault(name, {"rows": [], "weight": 0.0})
+                t["rows"].append(r)
+                t["weight"] += weight(r, today)
+    for t in out.values():
+        t["rows"].sort(key=lambda r: -weight(r, today))
+        t["sources"] = {r.get("source", "?") for r in t["rows"]}
+        t["thin"] = len(t["rows"]) < 3 or len(t["sources"]) < 2
+    return sorted(out.items(), key=lambda kv: -kv[1]["weight"])
+
+
+def render(ranked, total, dropped, quotes=2):
+    lines = ["# What users say", "", "%d reviews used, %d dropped (no link or no text)." % (total, dropped)]
+    for name, t in ranked:
+        lines += ["", "## %s%s" % (name, " (thin)" if t["thin"] else ""),
+                  "%d reviews, %d sources: %s" % (len(t["rows"]), len(t["sources"]), ", ".join(sorted(t["sources"])))]
+        for r in t["rows"][:quotes]:
+            lines.append('- "%s" (%s, %s/5) %s' % (r["text"], r.get("source", "?"), r.get("rating", "?"), r["url"]))
+    return "\n".join(lines) + "\n"
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("csv")
+    ap.add_argument("--themes", help="JSON file {theme: [keywords]} that replaces the built-in themes")
+    ap.add_argument("--out")
+    args = ap.parse_args(argv)
+    try:
+        rows, dropped = load(args.csv)
+        themes = json.load(open(args.themes, encoding="utf-8")) if args.themes else THEMES
+    except (OSError, ValueError) as e:
+        print("remix-voice: %s" % e, file=sys.stderr)
+        return 2
+    text = render(rank(rows, themes), len(rows), dropped)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    print(text)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

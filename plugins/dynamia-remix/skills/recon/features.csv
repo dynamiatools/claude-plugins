@@ -1,0 +1,6 @@
+feature,area,priority,original,clone,notes
+Guest picks a free time slot,booking page,must,yes,no,
+Host sets weekly availability,availability,must,yes,no,
+Reschedule a booking,booking page,should,yes,no,
+Team round-robin,teams,could,yes,no,
+Partner marketplace,marketplace,could,yes,skip,their network is not a feature

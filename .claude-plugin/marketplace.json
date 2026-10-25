@@ -53,6 +53,11 @@
       "name": "mcp-tool-chain",
       "source": "./plugins/mcp-tool-chain",
       "description": "Chain many MCP tool calls in one short Python script, so intermediate results never pass through the model's context. Imports the stdio MCP servers it finds."
+    },
+    {
+      "name": "dynamia-remix",
+      "source": "./plugins/dynamia-remix",
+      "description": "Remix an app you admire into your own product, clean-room: map it, plan and rebuild it, score parity, read what its users hate, and rebrand so nothing of the original is left."
     }
   ]
 }

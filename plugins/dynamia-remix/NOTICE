@@ -1,0 +1,10 @@
+dynamia-remix adapts ideas from replica-skill by Jake Schincariol
+(https://github.com/Jakeschincariol/replica-skill), MIT License,
+Copyright (c) Jake Schincariol.
+
+What was taken: the workflow idea (map an app, rebuild it clean-room, score
+parity, read user reviews for gaps, sweep for leftovers of the original) and the
+feature matrix columns. What changed: the skills, the three scripts
+(remix-parity, remix-voice, remix-sweep) and all text were written from scratch
+and reduced from eleven skills to six; design, test, launch and deploy are left
+to other plugins.
