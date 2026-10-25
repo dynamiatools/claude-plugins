@@ -1,250 +1,118 @@
 # dynamia
 
-**The way we work with Claude Code at [Dynamia](https://dynamiasoluciones.com), packaged as a plugin you can install in two commands.**
+**The way we work with Claude Code at [Dynamia](https://dynamiasoluciones.com), packaged as a plugin.**
 
-AI coding gets expensive and risky when the model does the boring parts: juggling git across repos, re-running tests, re-reading the same files. These are the habits we settled on after a lot of real use, and they are free for you to use under MIT:
+AI coding gets expensive and risky when the model does the boring parts: juggling git across repos, re-running tests, re-reading the same files. This plugin is a workflow that takes those parts away from the model and puts guard rails around the risky ones.
 
-- **Let the tool do the plumbing.** `ms-workspace` handles git, tests and bookkeeping, so the model spends tokens on thinking, not on `git status`.
-- **Work in batches, not in a mess.** Every task gets its own copy of the repos, so nothing half-done leaks into your main checkout.
-- **Guard the dangerous stuff.** Hooks block secrets, destructive commands and runaway output before they happen.
-- **Spend tokens on purpose.** Cheap helper agents search and summarize; a token audit shows where your plan went.
-- **Humans publish.** Agents commit locally; you decide what ships.
+- **Let a tool do the plumbing.** `ms-workspace` handles git, tests and bookkeeping, so the model spends tokens thinking, not running `git status`.
+- **Work in batches.** Each task gets its own copy of the repos; nothing half-done reaches your main checkout.
+- **Guard the dangerous stuff.** Hooks block secrets, pushes from agents and runaway output.
+- **Spend tokens on purpose.** Cheap helper agents search and summarize; reports show where the plan went.
+- **Humans publish.** Agents commit locally. You decide what ships.
 
-What you get: 19 skills, 4 helper agents, guard hooks, a small stdlib-only Python tool and a panel for development env vars.
+It has 19 skills, 4 read-only helper agents, guard hooks, a standard-library Python tool (`ms-workspace`) and a status line.
 
 ## Install
-
-In Claude Code:
 
 ```
 /plugin marketplace add dynamiatools/claude-plugins
 /plugin install dynamia@dynamia-tools
 ```
 
-`dynamia@dynamia-tools` is `<plugin>@<marketplace>`: `dynamia-tools` is the marketplace in the `dynamiatools/claude-plugins` repo and `dynamia` is the plugin inside it. Third-party marketplaces do not auto-update by default: turn it on in `/plugin` > Marketplaces, or run `/plugin update dynamia`.
+Then, in a **new** session, run `/dynamia:setup` once. A plugin cannot set your status line, permissions or `~/.claude/CLAUDE.md`, so this skill does it: it shows a preview, asks, makes a backup, adds the status line and permission rules, the global instructions (`~/.claude/DYNAMIA.md`) and puts `ms-workspace` in `~/.local/bin`. `ms-workspace doctor` checks the result; `/dynamia:setup --remove` undoes it. Updates need no new setup (`/plugin update dynamia`).
 
-The plugin provides the skills (`/dynamia:<skill>`), the agents (`dynamia:<agent>`), the hooks and `ms-workspace` on the Bash tool's PATH. Claude Code does not let a plugin set the status line, permissions or `~/.claude/CLAUDE.md`, or put tools in your shell PATH, so one skill finishes the job. In a **new** Claude Code session run:
-
-```
-/dynamia:setup
-```
-
-It shows a preview, asks, makes a backup and then:
-- adds the status line (`ms-statusline`) and the permission rules to `~/.claude/settings.json`, and removes an older copy of the hooks so they do not run twice;
-- copies the global instructions to `~/.claude/DYNAMIA.md` and adds one `@DYNAMIA.md` import line to `~/.claude/CLAUDE.md`, between `dynamia:begin/end` markers (your own content in that file stays; a link to the repo file is replaced, never written through);
-- puts `ms-workspace` and `ms-statusline` in `~/.local/bin` as small launchers that run the newest installed plugin version, and points the status line at them (add `~/.local/bin` to your `PATH` if the report says so).
-
-Once is enough: the launchers find the newest version themselves, so `/plugin update` needs no new setup. Run it again only to refresh the `~/.claude/DYNAMIA.md` copy (`ms-workspace doctor` tells you when it is outdated). Check with `ms-workspace doctor`. Nothing needs a clone of the repo or `install.sh`.
-
-To remove: `/dynamia:setup --remove` (undoes the three), then `/plugin uninstall dynamia@dynamia-tools`.
-
-`/plugin` does not run inside a Remote Control session; from a terminal use `claude plugin marketplace add dynamiatools/claude-plugins` and `claude plugin install dynamia@dynamia-tools`.
-
-`install.sh` (needs a clone) does the same linking without the skill, for use without the plugin or on a machine where you prefer a script:
-- It is idempotent and uses symlinks, so this repo stays the single source of truth.
-- Files that already exist are moved to `~/.claude/backups/my-claude-<timestamp>/`, never deleted. Your own `~/.claude/CLAUDE.md` is replaced by the one in this repo (backed up first).
-- `--legacy` also links skills and agents into `~/.claude`, for use without the plugin (the skills then have no `dynamia:` prefix and the hooks come from `/dynamia:setup` without `--plugin-root`).
-- `--uninstall` removes only links that point to this repo. `CLAUDE_HOME` and `BIN_DIR` redirect the targets (defaults `~/.claude` and `~/.local/bin`; make sure `BIN_DIR` is in your `PATH`).
-
-## Use it
-
-1. `/dynamia:workspace-init`: builds a workspace in `.dynamia/` (inside a repo it makes a one-repo workspace and ignores the folder locally; otherwise it asks which repos, clones them, detects stacks, writes `workspace.toml`; an existing `CLAUDE.md` is respected).
-2. `/dynamia:batch`: opens a batch of local work, one isolated worktree per repo. Work in it, optionally with parallel agents. The agent estimates whether a plain local branch is enough, recommends one option and asks you to choose: a small, single-repo task on a clean checkout that is on the base branch. A worktree gets priority when the repo is not on its base branch, the task is new, the checkout is dirty, or it spans repos; when unsure it uses a worktree. The plain-branch path has no `int/<batch>`; ship it with `/dynamia:ship --branch`.
-3. `/dynamia:test`: runs t0 (what changed), t1 (the whole batch) or t2 (end to end) and triages failures.
-4. `/dynamia:integrate`: merges the agents' branches and runs t1.
-5. `/dynamia:ship`: shows the plan, asks, syncs, tests and pushes (or opens a PR). Only when you ask.
-
-Day to day: `/dynamia:report` (plan usage and where tokens went), `/dynamia:memory` and `/dynamia:recall` (durable notes and past sessions), `/dynamia:gate` (secret scan before shipping). The hooks protect you without being invoked: agents in a batch cannot push or open PRs, and large reads are warned about (see Guardrails).
-
-## What's inside
+## The workflow
 
 ```
-.claude-plugin/plugin.json   hooks/hooks.json   skills/   agents/
-bin/ (ms-workspace, ms-statusline)   lib/ms_workspace/ (the tool)   tests/
-install.sh   CLAUDE.md (global instructions)   settings/hooks.example.json (source for /dynamia:setup)
+once per machine   once per project        per task                                    when you say so
+ /setup             /workspace-init   ->   /batch  ->  work  ->  /test  ->  /integrate  ->  /ship
+                    (workspace.toml)       worktrees   agents     t0         merge + t1      gate, sync,
+                                                                                              push or PR
 ```
 
-The plugin name is the prefix, so nothing collides with other skills or agents: `/dynamia:<skill>` and `dynamia:<agent>`. The command-line tools keep the `ms-` prefix (`ms-workspace`, `ms-statusline`).
+1. **Set up the workspace (once per project): `/dynamia:workspace-init`.** Writes `.dynamia/workspace.toml`: the repos, their base branches, dependency order and test commands. *Why:* every other skill reads this one file, so none of them has to guess how to test or where to push.
+2. **Open a batch (per task): `/dynamia:batch`.** Creates one isolated git worktree per repo on a branch `int/<batch>`. For a small, one-repo task on a clean checkout it can recommend a plain branch instead, and it asks you. *Why:* your main checkout stays clean, and several tasks can run side by side.
+3. **Work.** Optionally give each parallel agent its own worktree (`ms-workspace agent new`), so agents never edit the same files. While you work, `/dynamia:test` runs **t0** (only what changed; a pass is remembered, so repeating it is instant) and triages failures. `/dynamia:dev-env` registers the environment variables the tests need.
+4. **Join the agents' work: `/dynamia:integrate`.** Merges the agent branches into `int/<batch>` in dependency order, names conflicting files, then runs **t1** (affected modules plus the ones marked critical). *Why:* conflicts show up locally, before anything is published.
+5. **Ship, only when you ask: `/dynamia:ship`.** Shows the plan (target branch, commits, diffstat), asks, then scans for secrets (`/dynamia:gate`), merges a moved base branch, re-runs t1 and the end-to-end command and pushes or opens a PR. Never force-pushes, never targets a release branch. *Why:* publishing is the one step that stays human. The permission prompt of `ship` is the confirmation.
+6. **Afterwards.** `ms-workspace undo <batch>` reverts the last ship with a new commit; `ms-workspace clean` removes finished batches.
 
-**Skills**
+Day to day, around the flow: `/dynamia:report` (plan usage, where tokens went, flaky tests), `/dynamia:memory` and `/dynamia:recall` (notes and past sessions), `/dynamia:release` (what waits for qa or main), `/dynamia:open` (a batch in your IDE).
 
-| Skill | What it does |
-|---|---|
-| `/dynamia:workspace-init` | Creates or updates a multi-repo workspace from scratch |
-| `/dynamia:batch` | Starts a batch: one isolated worktree per repo, optionally one per agent |
-| `/dynamia:integrate` | Merges the agents' branches, reports conflicts, runs the incremental tests |
-| `/dynamia:ship` | Shows what would be sent, asks, syncs, tests, pushes. User-invoked only |
-| `/dynamia:dev-env` | Registers development env vars in `workspace.toml` (asks which; for one repo or all) |
-| `/dynamia:setup` | Installs or removes the hooks, status line and permissions in `settings.json`. User-invoked only |
-| `/dynamia:report` | How it is going: plan usage, where tokens went, flaky or slow tests, next step |
-| `/dynamia:tmux-session` | Starts a tmux session with Claude Code (and Remote Control) in a project folder |
-| `/dynamia:code-tunnel` | Opens a Cloudflare tunnel to the remote code viewer for the current repo |
-| `/dynamia:test` | Runs t0, t1 or t2 and triages failures |
-| `/dynamia:gate` | Scans what would be sent for secrets and leftovers (read-only) |
-| `/dynamia:memory` | Saves and finds the workspace's durable notes: decisions, lessons, gotchas, handoffs |
-| `/dynamia:recall` | Searches past sessions, notes and the log (read-only) |
-| `/dynamia:release` | What waits to go to qa/main and release notes (read-only) |
-| `/dynamia:sys` | Machine load, disk, memory, ports and leftover processes (read-only) |
-| `/dynamia:powers-installers` | Installs, checks and removes agent tools (uv, rtk, codebase-memory, graphify, headroom); plan first, runs only with approval |
-| `/dynamia:http` | API checks with assertions and local mock servers |
-| `/dynamia:open` | Opens a batch or an agent's worktrees in VS Code or IntelliJ (never touches Git) |
-| `/dynamia:git-status` | Compact, read-only status card of the current git repo |
+## Skills
 
-**Agents** (read-only; the first three run on Haiku so the main model does not spend tokens on reading and summarizing)
+### They need a workspace
+These read `workspace.toml`. Without one the tool answers `no .dynamia/workspace.toml found`; run `/dynamia:workspace-init` first. A one-repo workspace is enough (it is made inside a git repo and ignored locally).
+
+| Skill | What it does | Why it exists |
+|---|---|---|
+| `/dynamia:workspace-init` | Creates or updates the workspace: finds repos, clones missing ones, detects stacks and base branches | The single entry point; the rest of the flow depends on its config |
+| `/dynamia:batch` | Starts a batch: one worktree per repo | Isolation: no task touches a shared checkout |
+| `/dynamia:test` | Runs t0 (changed), t1 (whole batch) or t2 (end to end); triages failures | Cheap, cached test levels so the model does not run or read whole suites |
+| `/dynamia:integrate` | Merges agent branches into the batch, reports conflicts, runs t1 | Makes parallel agents safe |
+| `/dynamia:ship` | Plan, sync, tests, push or PR. Only when you ask | Controlled publishing in one place |
+| `/dynamia:dev-env` | Registers dev environment variables per repo or for all | Tests and e2e run with the right variables, kept out of the model's hands |
+| `/dynamia:open` | Opens a batch or an agent's worktrees in VS Code or IntelliJ | Review the work where you are used to reading code |
+| `/dynamia:memory` | Saves and finds durable notes: decisions, lessons, gotchas, handoffs | The log says what happened; notes say what was learned |
+| `/dynamia:recall` | Full-text search over past sessions, notes and the log | "Where did we decide X?" without re-reading transcripts |
+| `/dynamia:release` | What waits to go from the base branch to qa or main; release notes | Release prep without manual git archaeology |
+| `/dynamia:report` | Plan usage and pace, where tokens went, slow or flaky tests | Spend the plan on purpose. Usage works without a workspace; the per-batch history needs one |
+
+### They work anywhere
+
+| Skill | What it does | Why it exists |
+|---|---|---|
+| `/dynamia:setup` | Installs or removes the status line, permissions and global instructions | Things a plugin cannot configure by itself |
+| `/dynamia:gate` | Scans what would be sent for secrets, conflict markers, huge files and debug leftovers | Read-only; works in a plain repo too, and `ship` runs it for you |
+| `/dynamia:http` | API checks with assertions, and local mock servers for third-party APIs | Test endpoints and integrations without the real service. Smoke checks before shipping need a workspace |
+| `/dynamia:git-status` | Compact status card of the current repo | A quick, read-only look at where things stand |
+| `/dynamia:sys` | Machine load, disk, memory, ports and leftover processes | Find who holds a port or what was left running |
+| `/dynamia:tmux-session` | Starts a tmux session with Claude Code and Remote Control in a project | Work from another device |
+| `/dynamia:code-tunnel` | Opens a Cloudflare tunnel to the remote code viewer for the current repo | Share a read-only view of the code |
+| `/dynamia:powers-installers` | Installs, checks and removes agent helpers (uv, rtk, codebase-memory, graphify, headroom); shows the plan first | One reviewed script instead of ad-hoc installs |
+
+## Agents
+
+Read-only helpers. The first three run on Haiku so the main model does not spend tokens on reading and summarizing.
 
 | Agent | Use |
 |---|---|
 | `dynamia:scout` | Finds where code lives: paths and one line each |
 | `dynamia:test-triage` | Classifies a failing run (code, test, flaky, environment, config, build) and points to the file |
 | `dynamia:summarizer` | Condenses diffs, history and logs; drafts commit messages in each repo's style |
-| `dynamia:boss` | Opus architecture review of a batch, diff or design; returns a verdict plus blocking and should-fix findings |
+| `dynamia:boss` | Opus architecture review of a batch, diff or design: verdict, blocking and should-fix findings |
 
-**Tools**: `ms-workspace` (Python 3.11+, standard library only) does the git, test and bookkeeping work so the model does not; `ms-statusline` (bash + jq) shows the model, the git branch with uncommitted files and ahead/behind, context, cost and plan usage in the footer, in color (`NO_COLOR` turns it off) and saves the plan-usage snapshot.
+## Guard rails
 
-## The batch workflow
+They work without being invoked.
 
-Everything stays local until `ship`. Agents commit locally and never push.
-
-| Step | Command | What happens |
-|---|---|---|
-| 1 | `batch new <batch> [repos]` | One worktree per repo on `int/<batch>`, branched from the base branch (for example `next`). Ignored files a fresh worktree lacks (`.env`, secrets) are copied from the main checkout; tracked files never are |
-| 2 | `agent new <batch> <task> [repos]` | Optional isolated worktree per parallel agent (`agent/<batch>/<task>`), so agents never touch the same files |
-| 3 | `test t0` | Tests only what changed in the current repo. A pass is remembered by a hash of the code and command, so repeating it is instant (`--no-cache` forces a run) |
-| 4 | `integrate <batch> [--dry-run]` | Merges the agent branches into `int/<batch>` in dependency order and names conflicting files. `--dry-run` checks each branch against `int/<batch>` only, not against each other |
-| 5 | `test t1 <batch>` | Affected modules plus the repo's `critical` modules, for each changed repo |
-| 6 | `plan <batch>` | Shows what would be sent: per repo the target branch, push mode, commit subjects and a diffstat. Refuses while agent branches are not integrated |
-| 7 | `ship <batch>\|--branch [repo] --yes [--pr\|--direct]` | `--branch` ships the task branch checked out in a repo's own checkout (the plain-branch path of `/dynamia:batch`) with the same steps, and leaves the branch in place. Merges a moved base branch, re-runs t1, runs the `[e2e]` command (or `--skip-e2e`), then pushes `int/<batch>` to the base branch (`push = "direct"`) or opens a PR (`push = "pr"`, needs `gh`). `--pr` forces a PR for that run in every repo, whatever its `push` setting (`plan <batch> --pr` previews it); it is what "open a PR" means to `/dynamia:ship`. `--direct` forces a direct push the same way. With `push = "ask"` a repo has no default: `plan`/`ship` refuse until the run says `--pr` or `--direct`, so the agent asks you first. For a big change `plan`/`ship` print `RECOMMEND A PR` (defaults: 20 files, 800 lines or 10 new files, tunable in `[ship]`); it is advice only, the mode never changes by itself and the agent relays it and lets you choose. Never targets a `release` branch, never force-pushes |
-| 8 | `undo <batch> [--yes]` | Reverts the last ship: every `ship --yes` records what each base branch pointed to before and after. `undo` shows the plan; with `--yes` it pushes one new commit per repo that restores the previous tree (history kept, never a force-push). If someone else pushed in the meantime it refuses for that repo and prints the exact `git revert` commands; in `pr` mode it prints how to close the PR. Works after `clean` too |
-| 9 | `clean [<batch>]` | Lists batches, or removes one whose branch is in its base branch **and** whose agent branches are all integrated; otherwise it refuses and names them (`--force` discards on purpose) |
-
-`ms-workspace open <batch> [--ide code|idea] [--repo R] [--agent TASK] [--dry-run]` opens the batch's real worktree paths in an IDE and never touches Git (no checkout, commit, merge or push). VS Code gets one generated `<workspace>/ide/<batch>.code-workspace` (outside every repo, rewritten only when it changes), so search and Git see only that batch; IntelliJ opens each worktree as its own project, because it recognizes Maven/Gradle modules only from the opened directory's own `pom.xml`/`build.gradle` (use `--repo` for one window; ignore `.idea/` in the repo, or `ship` sees it as uncommitted). `--agent TASK` opens that agent's worktrees. The launcher is found on `PATH` (and the JetBrains Toolbox scripts), or set it in `workspace.toml`: `[ide]` with `default = "code"`, `code = "..."`, `idea = "..."`. `open` is in `ask` because it runs a configured command.
-
-A repo can set `env = ["NAME=value", ...]` in `workspace.toml`; those variables are added to its `test`, `[e2e]` (the e2e repo's) and `env --setup` commands. A changed value invalidates the remembered test pass, a malformed entry stops with a clear error. The file is shared and committed, so keep secrets in `env_files` instead.
-
-Names are validated, and a failed `batch new` or `agent new` rolls back what it created. `ms-workspace env [batch] [--setup] [--trust]` re-copies ignored files, runs each repo's `setup` command and marks worktrees as trusted so background agents skip the trust dialog.
-
-## Guardrails
-
-- **Permissions are narrow on purpose.** `allow` covers read-only and local subcommands (`status`, `log`, `usage`, `plan`, `test`, `integrate`, `batch new`, ...). `ship`, `undo`, `clean`, `env`, `setup-hooks`, `docker clean`, `ps kill`, `notify` and `http run|bench` are in `ask`, so Claude Code always prompts before anything is pushed, deleted or run from configuration. `setup-hooks` replaces an older broad `Bash(ms-workspace:*)` rule.
-- **The guard** (`ms-workspace guard`, a PreToolUse hook) blocks `git push`, `gh pr create|merge`, `gh api` writes, `ms-workspace undo|clean|setup-hooks`, `ship --skip-gate`, `ps kill`, `docker clean` and `env --trust` **inside batch worktrees** (`env --setup` is allowed there so an agent can install dependencies with the repo's own `setup` command; it stays in `ask`, so the user approves it) (`ms-workspace ship` itself is allowed there: it is the sanctioned way to publish, it stays in `ask`, and the `/dynamia:ship` skill shows the plan and that permission prompt is the single confirmation), including option variants, `bash -c`, `eval`, wrappers and `cd` into a batch from elsewhere. It fails closed: inside `working-trees/` (`.batches/` in older layouts) it decides from the command text alone, so a broken `workspace.toml` cannot open the gate. It stops mistakes and realistic variants, not a determined adversary. Blocked attempts are logged.
-- **Plan usage.** Claude Code exposes the 5h session and weekly usage only to the status line, so `ms-statusline` stores a snapshot and `ms-workspace usage` reads it: percent used and left, time to reset, pace, projection and a verdict. `usage --check` exits 0 ok, 1 warn, 2 critical, 3 no data, so skills and agents confirm with you before starting; `--need <pct|auto>` checks that a planned task fits (`auto` uses the median of past completed batches, at least 3). Thresholds come from `[usage]` in `workspace.toml` (default 70/90). Projections only influence the verdict above 50 % used. Pro/Max plans only; data appears after the first reply of a session.
-- **Token-saving hooks.** `readguard` (PreToolUse on Read) tells Claude when it is about to re-read an unchanged file that is already in its context (files under 4 000 characters are ignored; a compaction or `/clear` resets the memory, because re-reading is legitimate then). `outguard` (PostToolUse on Bash) replaces a Bash output longer than 30 000 characters with its first and last 60 lines, saves the full text to a file it names, and keeps `stderr` and the output shape. Tune it with `[context] bash_output_max_chars`, `MS_OUTGUARD_MAX_CHARS`, or turn it off with `MS_OUTGUARD=off`. Neither hook can fail a session.
-- **Memory.** The log says what happened; `ms-workspace memory` keeps what was learned: one markdown note per fact (`decision`, `lesson`, `gotcha`, `handoff`) with `add`, `list`, `search`, `show`, `forget`. If an agent must stop early it leaves a handoff for the next session; `context` shows only a count and the latest handoff of each active batch, so it costs a few tokens. Handoffs disappear with their batch.
-
-## Observability
-
-- **`context`** (SessionStart hook) injects a short briefing: active batches, open tasks, plan usage, memory and handoffs, last actions. It prints nothing outside a workspace.
-- **`log [-n N] [--day D] [--action A]`**: one JSON line per action in `<workspace>/logs/` (`<workspace>` is `.dynamia/workspace/`; older layouts keep it in `.ms-workspace/logs/`), one file per day, pruned after `log_retention_days` (default 14). Test events carry duration, a code hash and the plan usage at that moment.
-- **`budget [--top N] [--json]`**: what every session loads before you type anything, in tokens (estimate: characters / 4, an upper bound): global and workspace `CLAUDE.md` plus their imports, unscoped rules, the name and description of every skill and agent, Claude's auto-memory index and what `context` injects, with hints for the biggest items. Path-scoped rules are listed as on-demand, and MCP servers are counted but their tool schemas are not measurable from files.
-- **`insights [--days N]`**: slow runs, flaky candidates (same code, both pass and fail), time per batch and an approximate plan cost per batch (usage jumps between a batch's events, so parallel work elsewhere is counted too).
-- **`tokens [--days N]`**: reads Claude Code's local transcripts for sessions run inside the workspace and reports requests, new input, cache reads and output per batch or repo, the tools whose results were largest (characters divided by 4), repeated reads of one file, and hints. Everything stays local.
-- **Pasted images.** Claude Code keeps chat images only as base64 inside the session transcript. `images capture` (Stop and SessionEnd hook) saves the new ones to `<workspace>/images/YYYY-MM-DD/HHMMSS_<session>_<n>.<ext>` with an `index.jsonl` (time, session, directory, the text sent with the image). Duplicates are skipped by hash, files older than `images_retention_days` (default 30) are pruned, `images [list]` shows recent ones and `images backfill` imports past sessions. They may contain sensitive data: they stay local, outside any repo.
-- **`status [--fetch]`** (one line per repo), **`doctor`** (tools, versions, workspace, hooks, usage snapshot, resources), **`affected`** (changed modules and dependent repos).
-
-## API checks
-
-`ms-workspace http` runs requests described in `requests/*.http.toml` (in the workspace root, or any file path) with assertions, and logs every exchange. Copy `skills/workspace-init/references/requests/` as a starting point.
-
-```bash
-ms-workspace http run smoke --env local      # PASS/FAIL per request, exit 1 if anything failed
-ms-workspace http run smoke --only login --var user=bob --tag smoke --fail-fast --json
-ms-workspace http history                    # past runs
-ms-workspace http show last [request]        # the failing exchanges (masked bodies, headers, timing)
-ms-workspace http diff [runA] [runB]         # what changed vs the previous run: status, result, speed, JSON values
-ms-workspace http bench smoke --name health -n 20   # min/avg/p50/p95/max; flags a p95 regression against the last bench
-ms-workspace http list
-```
-
-- **Assertions** per request under `expect`: `status` (number or list), `max_ms`, `json` (dotted path to value, `items.0.id`), `json_exists`, `body_contains`, `body_not_contains`, `headers`. Without `status`, only 4xx and 5xx fail.
-- **Chaining**: `capture = { token = "json:access_token" }` (also `header:`, `regex:`, `status`) feeds `{{token}}` into later requests. A request whose variable has no value is skipped, not guessed.
-- **Variables**: `requests/env/<env>.toml` (committed, plain values), `--var k=v`, captured values, `{{env:NAME}}` from the process environment, `{{secret:NAME}}` from `requests/env/<env>.secrets` (dotenv, keep it out of git) or the environment.
-- **Secrets stay out of logs and output**: `{{secret:...}}` values, sensitive headers (`Authorization`, `Cookie`, `*token*`, `*password*`, `*api-key*`), such JSON keys in request and response bodies, and such query parameters are replaced by `***`. The log is `<workspace>/http/YYYY-MM-DD.jsonl`; bodies are cut at 4 000 characters. Outside a workspace the log goes to `~/.cache/ms-workspace/http/`.
-- **Safety**: an environment file with `confirm = true` (qa, prod) refuses to run without `--yes` and refuses `bench`. Redirects are not followed unless a request sets `follow_redirects = true`; `insecure = true` accepts self-signed certificates. Permissions: `list`, `history`, `show`, `diff` are allowed; `run` and `bench` always ask, because they send traffic.
-- **Smoke checks before shipping**: `[http] smoke = "smoke"` and `smoke_env = "local"` in `workspace.toml` make `ship --yes` run that collection after t1 and before e2e; a failure blocks the push (`--skip-smoke` bypasses it deliberately). `plan` shows the line.
-
-## Local tools: mock server, Docker, system, processes
-
-**Mock server** (`ms-workspace mock`). A local stand-in for third-party APIs (payments, tax authority) that records every call, so you can test without the real service and then assert what your code sent. Definitions live in `mocks/*.mock.toml` (example: `skills/workspace-init/references/mocks/`).
-
-```bash
-ms-workspace mock start payments        # background server on 127.0.0.1 (free port, or port = N / --port N); --restart reloads the file
-ms-workspace mock url payments          # feed it to the app, or: ms-workspace http run smoke --var base_url=$(ms-workspace mock url)
-ms-workspace mock requests --unmatched  # what was received (masked); -n, --path, --method
-ms-workspace mock assert --path /v1/payments --method POST --times 1 --json amount=100   # exit 1 with the closest candidates if it does not hold
-ms-workspace mock status | list | stop [--all]
-```
-
-Routes match top to bottom (method, `{param}` or trailing `*` path, optional `match` on JSON body, query and headers). Responses: `status`, `json` or `body`, `headers`, `delay_ms`, and `sequence` for retries and flaky providers (the last step repeats, or cycles with `loop = true`). Templates `{{path.id}}`, `{{query.x}}`, `{{body.a.b}}`, `{{header.x}}`, `{{seq}}`, `{{uuid}}`, `{{now}}`; a value that is exactly one placeholder keeps its JSON type. Requests that match no route get a 404 and are recorded, so `assert --no-unmatched` catches calls you did not plan for. The log masks secrets like the `http` tool does.
-
-**Docker** (`ms-workspace docker`), compact and read-only except `clean --yes`:
-
-| Command | What it shows |
-|---|---|
-| `status [-a] [--project P]` | One line per container (image, state, short ports, compose project), plus unhealthy and stopped ones |
-| `logs <c> [-n N] [--since 10m] [--errors]` | Last lines with timestamps stripped and repeats collapsed (`(x37)`); `--errors` keeps only error-like lines |
-| `stats` | CPU and memory per container, heaviest first, flagged above 80 % |
-| `disk` | Space by images, containers, volumes and build cache, and how much is reclaimable |
-| `health <c...>` | Health state, last three check outputs, restarts, exit code, OOM kill |
-| `ports`, `env <c>` | Published ports; environment variables with sensitive values masked |
-| `wait <c...> [--timeout 120]` | Blocks until healthy (or running, when there is no healthcheck); exit 1 on failure or timeout |
-| `clean [--until 24h] [--yes] [--volumes]` | Plan of stopped containers and dangling images; `--yes` prunes them; volumes only with `--volumes` |
-
-**System** (`ms-workspace sys [--tools] [--json]`): OS, kernel, uptime, CPU and load per core, memory and swap, disks (root, `/tmp`, the workspace), network address, timezone, and with `--tools` the versions of git, gh, python, node, java, maven, gradle, docker and others. It adds a hint when memory is under 10 % available, swap is over half used, load per core is above 1.5 or a disk is nearly full. Linux first; macOS is best effort.
-
-**Processes** (`ms-workspace ps`):
-
-| Command | What it does |
-|---|---|
-| `ps [--top N] [--by cpu\|mem] [--mine] [--filter text]` | Heaviest processes (CPU is `ps`'s average since start) |
-| `ps tree <pid\|text>`, `ps find <text>` | A process with its children; processes whose command contains the text |
-| `ps ports [--port N] [--all]` | Listening TCP ports with their owner, and which workspace batch it runs in; `--port 8080` answers "who holds it" |
-| `ps leftovers [--hours 4] [--limit 20]` | Dev processes (java, node, mvn, python, cloudflared...) that are old or orphaned, labelled with the batch they run in |
-| `ps kill <pid...> [--signal TERM] [--yes]` | Plan first. Refuses other users' processes, this session and its parents, pid 1, and protected ones (systemd, sshd, tmux, claude); `--yes` sends the signal and checks that it worked |
-
-`clean` refuses to remove a batch while a process still runs inside it (`--force` overrides with a warning). On a shared server, `ps`, `docker` and `sys` only ever act on what the current user may touch.
-
-## Safety, quality and knowledge tools
-
-| Tool | What it does |
-|---|---|
-| `gate [batch]` | Scans the **added lines** of what would be sent for secrets (AWS, GitHub, Slack, Stripe, Google, JWT, private keys, credentials in URLs, hard-coded passwords and tokens), merge-conflict markers (only when both ends are present) and files over `max_file_kb`; debug leftovers (`console.log`, `debugger`, `.only(`, `System.out`, `printStackTrace`, `pdb`) are warnings, matched by language and spared in test files. Evidence is masked, placeholders and `word:word` values are not flagged, `ms-gate: allow` or `[gate] allow`/`ignore_paths` silence deliberate cases. `ship` runs it and stops on blocking findings (`--skip-gate` bypasses on purpose); works in a plain repo too |
-| `junit [paths] [--since MIN]` | Summarizes JUnit-style XML (Surefire/Failsafe, Gradle, vitest/jest-junit, pytest): totals, failing tests grouped by message, the first stack frame that is not framework code. When a test run fails and fresh reports exist, `test` prints this instead of the log tail and keeps the full output in `<workspace>/tests/` (`reports = [globs]` per repo to override discovery) |
-| `modules [deps\|rdeps <m>\|closure\|check]` | Reads the Maven reactor (modules declared at the top or inside profiles, inherited coordinates, `${properties}`): dependents of a change, the exact `closure` for `-pl` (also in `affected` and as `{closure}` in test commands), cycles, and `[[arch.rule]]` checks such as "depend on `api`, never on another module's `core`". On the real ERP it maps 131 modules in 0.2 s |
-| `recall <words>` | Full-text search (SQLite FTS5) over Claude Code sessions run in the workspace, memory notes and the log: "where did we decide X?". Secrets are masked before indexing, the index refreshes itself incrementally, results point to `claude --resume <id>` |
-| `handoff` | Writes the state needed to resume a batch (commits ahead, uncommitted files, unintegrated agent branches, open tasks, next step). Hooks write it by themselves before compaction and at session end, and on Stop when plan usage is high; one note per batch, unchanged state is not rewritten |
-| `release status\|notes [repo]` | Per repo with `release = [...]`: commits waiting to be promoted from the base branch, grouped by conventional-commit type, authors, diffstat, breaking changes, and hotfix drift (commits that exist only on `qa`/`main`); `notes` prints markdown by type |
-| `notify <msg>` | ntfy, webhook or a local command from `[notify]`; as a Notification hook it forwards "Claude needs your attention", and `on = ["ship"]` announces ship results. Nothing is configured by default, secrets are masked, repeats within 30 s are sent once, only `http(s)` URLs are accepted. A public ntfy topic can be read by anyone who guesses it |
+- **Narrow permissions.** Reading and local commands are allowed. `ship`, `undo`, `clean`, anything that deletes or runs from configuration always asks.
+- **The guard.** Inside a batch, agents cannot `git push`, open or merge PRs, or kill processes, including through `bash -c`, `eval` or `cd`. It fails closed and logs every blocked attempt. It stops mistakes, not a determined adversary.
+- **Token hooks.** `readguard` warns before re-reading an unchanged file; `outguard` cuts a Bash output over 30,000 characters to its first and last lines and saves the rest to a file.
+- **Plan usage.** `ms-statusline` records the 5h and weekly usage; skills check it before long work and ask you when it is high.
+- **Handoffs.** Before compaction and at the end of a session a note is saved, so the next session resumes where this one stopped.
 
 ## The workspace
-
-A workspace lives in a `.dynamia/` folder inside your project; the project folder keeps only `CLAUDE.md`:
 
 ```
 <project>/
 ├── CLAUDE.md
-├── api/  web/  ...         the repos (multi-repo workspace), in the project folder
+├── api/  web/  ...        the repos (multi-repo workspace)
 └── .dynamia/
-    ├── workspace.toml      config (see skills/workspace-init/references/workspace.example.toml for every key)
-    └── workspace/          working-trees/ (the batches), logs/, images/, memory/ and the rest of the tool's files; never the repos
+    ├── workspace.toml     the config
+    └── workspace/         working-trees/ (the batches), logs, memory; never the repos
 ```
 
-`/dynamia:workspace-init` first checks where you are (`ms-workspace project`):
-- **Inside a git repo**: a one-repo workspace. The repo is the project folder (`path = "."` in `workspace.toml`), and `.dynamia/` is added to the repo's `.git/info/exclude` (`ms-workspace exclude`): local to this clone, nothing tracked, and shared by every worktree, so the repo and its batch worktrees stay clean in `git status`. A new clone needs `ms-workspace exclude` once.
-- **Outside a repo**: a multi-repo workspace; the clones go to `<project>/<repo>`, next to `.dynamia/`, which only keeps the config and what the tool generates.
-- **The repo's own `CLAUDE.md` is respected**: it is never edited unasked. The skill asks whether to add the workspace block at the end (`ms-workspace claude-md --append`); with a block already there, only the block is refreshed.
-
-Older workspaces (`workspace.toml` and everything in one folder) and the clones that 0.4/0.5.0 left inside `.dynamia/workspace/`, and the `.batches/` and `.ms-workspace/` dot folders of 0.6.0, keep working; `ms-workspace migrate` shows the move and `migrate --yes` applies it (it refuses while batches are open, because worktrees store absolute paths).
-
-Things to know in a one-repo workspace: `git clean -fdx` in the repo also deletes ignored files, so it would wipe `.dynamia/` (plain `-fd` is safe); and tools that scan the whole tree without reading `.git/info/exclude` (pytest, jest, an IDE indexer) can see the batch copies under `.dynamia/workspace/working-trees/`, so exclude that folder there.
+- **Inside a git repo** it is a one-repo workspace. `.dynamia/` is excluded through `.git/info/exclude`, so the repo stays clean.
+- **Outside a repo** it is a multi-repo workspace; the clones go next to `.dynamia/`.
+- The repo's own `CLAUDE.md` is never edited unasked.
 
 ```toml
 name = "shop"
-tasks = "local"                     # or "github" or "ask" (the agent asks where to keep them); a repo can override it
 [repos.framework]
 base = "next"
 [repos.framework.test]
 unit = "mvn -T1C -B test"
-affected = "mvn -T1C -B test -pl {modules} -amd"
 [repos.erp]
 base = "next"
 deps = ["framework"]
@@ -254,49 +122,13 @@ command = "docker compose -f e2e/docker-compose.yml up --abort-on-container-exit
 repo = "erp"
 ```
 
-`ms-workspace claude-md` generates `<workspace>/CLAUDE.md` (repos in dependency order, agent rules, the flow, token and tool guidance, taken from `[tools]`). Only the block between the `ms-workspace:begin/end` markers is managed, so your notes around it survive every regeneration. The Tasks section also tells agents to use the DynamiaTasks MCP (`mcp__dynamia-tasks__*`, [dynamiatools/dynamia-tasks](https://github.com/dynamiatools/dynamia-tasks), in development) when it is available; without it nothing changes. Without `[tools] discovery` the tool list names only what is installed (the graph when `codebase-memory-mcp` is on `PATH`, then Grep/Glob/Read); the IDE tools appear only if you list them. `claude-md --refresh` (offered after installing or removing `codebase-memory`) rewrites the file only when it is entirely generated; a CLAUDE.md with your own text is never touched.
+Every key is in `skills/workspace-init/references/workspace.example.toml`.
 
-## Development environment variables
+## More
 
-Local-development variables live in `.dynamia/workspace.toml`, in tables of their own (`[dev.env]` for every repo, `[repos.<r>.dev.env]` for one, which wins). They are applied to the commands the workspace runs: `test` (t0, t1, t2), the e2e command and `env --setup`. A changed value invalidates a cached passing test. Plain text, for local use only.
-
-```bash
-ms-workspace dev-env add API_URL=http://localhost:8080            # every repo
-ms-workspace dev-env add DEBUG=1 --repo erp                        # one repo
-ms-workspace dev-env list [--show|--json]  /  rm NAME [--repo R]   # names that look secret are shown as ***
-```
-
-Three ways in: `/dynamia:dev-env` (Claude asks which variables and registers them), the `ms-workspace` commands above, and the **dev-env panel**, a mod of this plugin: `/dynamia-env-panel` opens a pane (terminal and desktop, 110+ columns) with the current variables, fields for NAME and value, a repo picker and Add / remove buttons; `/dynamia-env-panel NAME=value [repo]`, `/dynamia-env-panel rm NAME [repo]` and `/dynamia-env-panel list` work everywhere, including the mobile app, which has no input fields yet. The mod is `hooks/register.tsx` (named in `hooks/hooks.json` under `modules`, next to the command hooks); it only calls `ms-workspace dev-env`, which stays the single writer of the file. Two more panels from the same mod (`hooks/panels.tsx`): `/dynamia-logs-panel` shows the latest `ms-workspace log` actions with a Refresh button, and `/dynamia-memory-panel` browses the memory notes, adds one (type + text) and forgets one with ✕.
-
-## Hooks
-
-With the plugin, the hooks load from `hooks/hooks.json` (paths use `${CLAUDE_PLUGIN_ROOT}`), so nothing is copied into `settings.json` except the status line and permissions: `/dynamia:setup` (or `ms-workspace setup-hooks --plugin-root <plugin folder> [--dry-run] [--remove] [--project]`) does that, and removes an older copy of the hooks so they do not run twice. Without the plugin, `ms-workspace setup-hooks` merges `settings/hooks.example.json` instead: idempotent, keeps every other hook, permission and setting, keeps a status line someone else configured, writes a timestamped backup. It adds `handoff --hook` (PreCompact, Stop, SessionEnd), `notify --hook` (Notification), `guard` and `readguard` (PreToolUse on Bash and Read), `outguard` (PostToolUse on Bash), `images capture` (Stop, SessionEnd), `context` (SessionStart), `readguard --reset` (SessionStart after `/clear` or a compaction), `ms-statusline` and the permission rules above. `install.sh` never edits your `settings.json` by itself.
-
-## Development
-
-- Everything in the repo is in English; skills and agents have no prefix (the plugin name is it) and the command-line tools use `ms-`; no secrets or machine-specific paths.
-- `ms-workspace` stays standard-library only. The CLI is the contract: `tests/` drives the real tool (bare remotes, worktrees, conflicts, hooks, usage snapshots, images, installer, skill frontmatter).
-
-```bash
-# from plugins/dynamia/
-python3 -m unittest discover -s tests            # about 45 s; throwaway repos and a private HOME
-python3 -m unittest tests.test_ms_workspace.TestShip -v
-```
-
-`MS_WORKSPACE_BIN` runs the suite against another build of the tool.
-
-**Add a skill**: create `skills/<name>/SKILL.md` with `name` and `description` frontmatter (avoid an unquoted `: ` in values, the suite checks it), write clear trigger conditions in `description`, test it with `claude --plugin-dir .` (it reloads with `/reload-plugins`), run `claude plugin validate .`, commit. The plugin name is the prefix, so name it plainly (`test`, not `ms-test`). Agents are one file each in `agents/`, also without prefix. Hooks go in `hooks/hooks.json`; keep `settings/hooks.example.json` in step, the suite compares them.
-
-## Roadmap
-
-- [x] API checks (`ms-workspace http`) with assertions, masked logs, diff and bench
-- [x] Local mock server, Docker views, system information and process tools
-- [ ] First end-to-end run on real repos (Maven, pnpm, Gradle) and a live check of the image hook
-- [x] Secret gate, JUnit summaries, Maven module graph with architecture rules, recall, automatic handoff, release view and notifications
-- [ ] Exact integration plan across agents (merge-tree chain) instead of per-branch `--dry-run`
-- [ ] `clean` recognising squash-merged PRs in `pr` mode
-- [ ] Import the remaining personal skills and agents from `~/.claude`
+- [REFERENCE.md](REFERENCE.md): every `ms-workspace` command, the full ship steps, API checks, mock server, Docker and process tools, observability, hooks, how to add a skill, and the roadmap.
+- Tests: `python3 -m unittest discover -s tests` from this folder (about 45 s).
 
 ## License
 
-[MIT](LICENSE), Copyright (c) 2026 Dynamia Soluciones. Use it, fork it, make it yours; a star or a pull request is always welcome.
+[MIT](LICENSE), Copyright (c) 2026 Dynamia Soluciones.

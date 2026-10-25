@@ -59,6 +59,6 @@ cd plugins/<name> && python3 -m unittest discover -s tests
 Removing: delete `plugins/<name>/`, its marketplace entry and README row, and say in the PR that installed copies keep working until the user uninstalls. Renaming changes the install name and every `/<plugin>:<skill>` command: avoid it, or do it with a note in the README.
 
 ## Where each plugin's details live
-- `plugins/dynamia/README.md`: batches, worktrees, hooks, `ms-workspace`, setup (also the longest "add a skill / agent / hook" guide).
+- `plugins/dynamia/README.md`: the workflow, which skills need a workspace and why. `plugins/dynamia/REFERENCE.md`: batches, worktrees, hooks, `ms-workspace` commands, setup, and the longest "add a skill / agent / hook" guide.
 - `plugins/dynamia-craft/README.md`: the six working-discipline skills.
 - `plugins/dynamia-platform/README.md`: Dynamia Platform skills, `dp-detect`, hooks.
