@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Feature parity score for remix/features.csv. Standard library only.
+
+    remix-parity remix/features.csv [--markdown] [--fail-under N]
+
+Columns: feature, area, priority (must|should|could), original (yes|no),
+clone (yes|partial|no|skip), notes. Weights must 3, should 2, could 1;
+partial counts half. Rows marked skip, and rows the original does not have
+(original=no), stay out of the score. Exit 1 when a must-have is not done
+or the score is under --fail-under.
+"""
+import argparse
+import csv
+import sys
+
+WEIGHT = {"must": 3, "should": 2, "could": 1}
+CREDIT = {"yes": 1.0, "partial": 0.5, "no": 0.0, "": 0.0}
+
+
+def load(path):
+    with open(path, newline="", encoding="utf-8-sig") as fh:
+        reader = csv.DictReader(fh)
+        rows = []
+        for n, raw in enumerate(reader, 2):
+            row = {(k or "").strip().lower(): (v or "").strip() for k, v in raw.items()}
+            if not row.get("feature"):
+                continue
+            prio = row.get("priority", "").lower()
+            clone = row.get("clone", "").lower()
+            if prio not in WEIGHT:
+                raise ValueError("line %d: priority must be must, should or could, got %r" % (n, prio))
+            if clone not in CREDIT and clone != "skip":
+                raise ValueError("line %d: clone must be yes, partial, no or skip, got %r" % (n, clone))
+            row["priority"], row["clone"] = prio, clone
+            rows.append(row)
+    return rows
+
+
+def score(rows):
+    scored = [r for r in rows if r["clone"] != "skip" and r.get("original", "yes").lower() != "no"]
+    total = sum(WEIGHT[r["priority"]] for r in scored)
+    got = sum(WEIGHT[r["priority"]] * CREDIT[r["clone"]] for r in scored)
+    musts = [r for r in scored if r["priority"] == "must"]
+    musts_done = [r for r in musts if r["clone"] == "yes"]
+    areas = {}
+    for r in scored:
+        a = areas.setdefault(r.get("area") or "(no area)", [0, 0.0])
+        a[0] += WEIGHT[r["priority"]]
+        a[1] += WEIGHT[r["priority"]] * CREDIT[r["clone"]]
+    weakest = sorted(((v[1] / v[0] * 100, k) for k, v in areas.items()))
+    missing = sorted((r for r in scored if r["clone"] != "yes"),
+                     key=lambda r: (-WEIGHT[r["priority"]], r.get("area", ""), r["feature"]))
+    return {
+        "pct": round(got / total * 100) if total else 0,
+        "musts": (len(musts_done), len(musts)),
+        "areas": weakest,
+        "missing": missing,
+        "skipped": [r for r in rows if r["clone"] == "skip"],
+        "added": [r for r in rows if r.get("original", "yes").lower() == "no" and r["clone"] != "skip"],
+    }
+
+
+def render(s, md):
+    h = "## " if md else ""
+    out = ["%sParity %d%%" % (h, s["pct"]),
+           "Must-haves done: %d of %d%s" % (s["musts"] + (
+               "" if s["musts"][0] == s["musts"][1] else "  (not shippable)",))]
+    out += ["", "%sAreas, weakest first" % h]
+    out += ["- %s: %d%%" % (name, pct) for pct, name in s["areas"]]
+    out += ["", "%sMissing, in build order" % h]
+    out += ["- [%s] %s%s%s" % (r["priority"], r["feature"], " (partial)" if r["clone"] == "partial" else "",
+                              " - " + r["notes"] if r.get("notes") else "") for r in s["missing"]] or ["- none"]
+    if s["added"]:
+        out += ["", "%sAdded by you (not scored)" % h] + ["- " + r["feature"] for r in s["added"]]
+    if s["skipped"]:
+        out += ["", "%sSkipped on purpose (not scored)" % h]
+        out += ["- %s: %s" % (r["feature"], r.get("notes") or "no reason given") for r in s["skipped"]]
+    return "\n".join(out)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("csv")
+    ap.add_argument("--markdown", action="store_true")
+    ap.add_argument("--fail-under", type=int, default=0)
+    args = ap.parse_args(argv)
+    try:
+        s = score(load(args.csv))
+    except (OSError, ValueError) as e:
+        print("remix-parity: %s" % e, file=sys.stderr)
+        return 2
+    print(render(s, args.markdown))
+    return 1 if s["musts"][0] != s["musts"][1] or s["pct"] < args.fail_under else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

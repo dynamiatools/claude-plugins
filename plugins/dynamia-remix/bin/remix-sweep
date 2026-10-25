@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Find anything of the original app left in your code. Standard library only.
+
+    remix-sweep [path] [--avoid "Name,Company"] [--domains a.com,b.com] [--colors "#006bff"]
+    remix-sweep [path] --config remix/brand.json     (keys avoid, domains, colors)
+
+Names match case-insensitively with any of space, - _ . between the words, so
+"Original App" also finds OriginalAppEmbed and original_app. Colors match as
+#rgb or #rrggbb. Skips .git, node_modules, build output, binaries and the remix/
+folder (it names the original on purpose). Exit 1 when something is found.
+"""
+import argparse
+import json
+import os
+import re
+import sys
+
+SKIP_DIRS = {".git", "node_modules", "dist", "build", "target", ".next", "__pycache__", "remix", ".venv"}
+MAX_BYTES = 1_000_000
+
+
+def patterns(avoid, domains, colors):
+    pats = []
+    for name in avoid:
+        words = re.split(r"[\s_.\-]+", name.strip())
+        if all(words):
+            pats.append(("name", name, re.compile(r"[\s_.\-]*".join(map(re.escape, words)), re.I)))
+    for d in domains:
+        pats.append(("domain", d, re.compile(re.escape(d.strip().lower()), re.I)))
+    for c in colors:
+        h = c.strip().lstrip("#").lower()
+        forms = {h}
+        if len(h) == 3:
+            forms.add("".join(ch * 2 for ch in h))
+        if len(h) == 6 and h[0::2] == h[1::2]:
+            forms.add(h[0::2])
+        pats.append(("color", c, re.compile("#(?:%s)(?![0-9a-f])" % "|".join(sorted(forms)), re.I)))
+    return pats
+
+
+def sweep(root, pats):
+    hits = []
+    for base, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in files:
+            p = os.path.join(base, f)
+            try:
+                if os.path.getsize(p) > MAX_BYTES:
+                    continue
+                data = open(p, "rb").read()
+                if b"\0" in data:
+                    continue
+                text = data.decode("utf-8", "replace")
+            except OSError:
+                continue
+            for n, line in enumerate(text.splitlines(), 1):
+                for kind, label, rx in pats:
+                    m = rx.search(line)
+                    if m:
+                        hits.append((os.path.relpath(p, root), n, kind, m.group(0)))
+            for kind, label, rx in pats:
+                if kind == "name" and rx.search(f):
+                    hits.append((os.path.relpath(p, root), 0, "filename", f))
+    return hits
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("path", nargs="?", default=".")
+    ap.add_argument("--avoid", default="")
+    ap.add_argument("--domains", default="")
+    ap.add_argument("--colors", default="")
+    ap.add_argument("--config")
+    a = ap.parse_args(argv)
+    split = lambda s: [x for x in (p.strip() for p in s.split(",")) if x]
+    avoid, domains, colors = split(a.avoid), split(a.domains), split(a.colors)
+    if a.config:
+        try:
+            cfg = json.load(open(a.config, encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            print("remix-sweep: %s" % e, file=sys.stderr)
+            return 2
+        avoid += cfg.get("avoid", [])
+        domains += cfg.get("domains", [])
+        colors += cfg.get("colors", [])
+    pats = patterns(avoid, domains, colors)
+    if not pats:
+        print("remix-sweep: nothing to look for; pass --avoid, --domains, --colors or --config", file=sys.stderr)
+        return 2
+    hits = sweep(a.path, pats)
+    for path, n, kind, found in hits[:100]:
+        print("%s:%s: %s %r" % (path, n or "-", kind, found))
+    if len(hits) > 100:
+        print("... and %d more" % (len(hits) - 100))
+    print("clean" if not hits else "%d leftovers" % len(hits))
+    return 1 if hits else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
