@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+import sys
+a = sys.argv[1:]
+assert a[0].startswith("--defaults-extra-file="), a
+assert not any("pass" in x.lower() for x in a), a
+out = next(x.split("=", 1)[1] for x in a if x.startswith("--result-file="))
+open(out, "w").write("-- dump\nCREATE TABLE t (id int);\n-- Dump completed on 2026-10-25\n")

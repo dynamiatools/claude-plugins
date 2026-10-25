@@ -13,6 +13,14 @@ argv, in the output or in this tool's config: a profile names a secret, the secr
   mysql-tool query PROFILE "SELECT ..."      read-only: one SELECT/SHOW/DESCRIBE/EXPLAIN SELECT
   mysql-tool exec PROFILE "SQL; SQL"         only the replication-setup statements in WRITE_OK
   mysql-tool plan-replica --source P --replica P --method xtrabackup|mariabackup|clone|dump
+  mysql-tool diagnose REPLICA --source P     why a replica is broken and the safe way out
+  mysql-tool plan-failover --candidate P [--old-source P] [--other P ...]
+  mysql-tool backup P --method xtrabackup|mariabackup|dump --target DIR [--dry-run]
+  mysql-tool verify-backup DIR
+  mysql-tool audit-config|audit-accounts|slow-queries|locks|upgrade-check P
+  mysql-tool schema-diff --a P --b P [--schema NAME]
+  mysql-tool monitor P [P ...] [--max-lag N]  one line per server, exit 1 on any problem
+  mysql-tool scan-secrets [PATH ...]          finds passwords left in files, never prints them
 
 SQL text may contain '@@ENV:NAME@@', replaced at run time by the escaped secret NAME.
 Destructive statements are never run by this tool.
@@ -173,7 +181,9 @@ def run_sql(prof, sql, readonly=True, timeout=60):
 
 
 def rows(out):
-    lines = [l for l in out.split("\n") if l != ""]
+    lines = out.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()  # only the trailing newline; an empty line inside is a real empty value
     if not lines:
         return []
     head = lines[0].split("\t")
@@ -501,6 +511,492 @@ def plan(sp, rp, method):
     return "\n".join(out) + "\n", not b
 
 
+# ---- more facts -----------------------------------------------------------------------------
+
+def all_vars(prof):
+    return {r["Variable_name"]: r["Value"] for r in q(prof, "SHOW GLOBAL VARIABLES")}
+
+
+def clean_gtid(s):
+    s = (s or "").replace("\\n", "").replace("\n", "").replace(" ", "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F:,\-]*", s):
+        raise Fail("unexpected characters in a GTID set")
+    return s
+
+
+def gtid_executed(prof, flavor):
+    col = "@@GLOBAL.gtid_current_pos" if flavor == "mariadb" else "@@GLOBAL.gtid_executed"
+    return clean_gtid(q(prof, "SELECT %s AS g" % col)[0]["g"])
+
+
+# ---- config audit ---------------------------------------------------------------------------
+
+def audit_config(flavor, v):
+    """Findings as (level, text) from the global variables. Pure, so it can be tested."""
+    out = []
+    add = lambda lvl, t: out.append((lvl, t))
+    if v.get("sync_binlog") not in (None, "1"):
+        add("warn", "sync_binlog=%s: a crash can lose committed transactions from the binary log" % v["sync_binlog"])
+    if v.get("innodb_flush_log_at_trx_commit") not in (None, "1"):
+        add("warn", "innodb_flush_log_at_trx_commit=%s: a crash can lose committed transactions" % v["innodb_flush_log_at_trx_commit"])
+    if v.get("log_bin") in ("OFF", "0"):
+        add("warn", "binary log is off: no replication source, no point-in-time recovery")
+    if v.get("binlog_format") not in (None, "ROW"):
+        add("info", "binlog_format=%s; ROW is the safe choice for replication" % v["binlog_format"])
+    if flavor != "mariadb":
+        if v.get("gtid_mode") != "ON":
+            add("warn", "gtid_mode=%s: replicas and failover need GTID" % v.get("gtid_mode"))
+        if v.get("enforce_gtid_consistency") != "ON":
+            add("warn", "enforce_gtid_consistency=%s" % v.get("enforce_gtid_consistency"))
+        if v.get("require_secure_transport") == "OFF":
+            add("info", "require_secure_transport=OFF: clients may connect without TLS")
+    elif v.get("gtid_strict_mode") == "OFF":
+        add("info", "gtid_strict_mode=OFF: out-of-order GTIDs are accepted silently")
+    sm = v.get("sql_mode", "")
+    if sm and "STRICT_TRANS_TABLES" not in sm and "STRICT_ALL_TABLES" not in sm:
+        add("warn", "sql_mode has no strict mode: bad data is truncated silently")
+    if v.get("character_set_server") not in (None, "utf8mb4"):
+        add("info", "character_set_server=%s (utf8mb4 is the usual choice)" % v["character_set_server"])
+    if v.get("local_infile") == "ON":
+        add("warn", "local_infile=ON: a hostile server or query can read client files")
+    if v.get("skip_name_resolve") == "OFF":
+        add("info", "skip_name_resolve=OFF: DNS lookups on every connection, host-based accounts depend on DNS")
+    for k in ("binlog_expire_logs_seconds", "expire_logs_days"):
+        if v.get(k) == "0" and v.get("log_bin") not in ("OFF", "0"):
+            if k == "binlog_expire_logs_seconds" and v.get("expire_logs_days", "0") != "0":
+                continue
+            add("warn", "%s=0: binary logs are never purged and will fill the disk" % k)
+    if v.get("innodb_buffer_pool_size") == "134217728":
+        add("info", "innodb_buffer_pool_size is the 128 MiB default; size it for the working set")
+    if v.get("performance_schema") == "OFF":
+        add("info", "performance_schema=OFF: no query digests for /dynamia-mysql:performance")
+    if v.get("max_connections", "").isdigit() and int(v["max_connections"]) > 2000:
+        add("info", "max_connections=%s is very high; each connection costs memory" % v["max_connections"])
+    return out
+
+
+ACCOUNT_COLS = ("plugin", "ssl_type", "Super_priv", "Grant_priv", "File_priv", "Shutdown_priv", "account_locked", "password_expired")
+
+
+def account_rows(prof):
+    have = {r["column_name"].lower(): r["column_name"] for r in q(
+        prof, "SELECT column_name FROM information_schema.columns WHERE table_schema='mysql' AND table_name='user'")}
+    cols = [have[c.lower()] for c in ACCOUNT_COLS if c.lower() in have]
+    sel = ", ".join(["User", "Host"] + cols)  # never the password or hash columns
+    return q(prof, "SELECT %s FROM mysql.user" % sel)
+
+
+def audit_accounts(rs):
+    out = []
+    for r in rs:
+        who = "'%s'@'%s'" % (r.get("User", ""), r.get("Host", ""))
+        if r.get("User", "") == "":
+            out.append(("warn", "anonymous account %s" % who))
+        if r.get("Host") == "%" and r.get("User") != "":
+            out.append(("warn", "%s accepts connections from any host" % who))
+        if r.get("Host") not in ("localhost", "127.0.0.1", "::1") and r.get("ssl_type", "ANY") in ("", None):
+            out.append(("info", "%s is reachable from the network and does not require TLS" % who))
+        for p in ("Super_priv", "Grant_priv", "File_priv", "Shutdown_priv"):
+            if r.get(p) == "Y" and r.get("User") not in ("root", "mariadb.sys", "mysql.sys", "rdsadmin"):
+                out.append(("warn", "%s has %s" % (who, p.replace("_priv", "").upper())))
+        if r.get("plugin") == "mysql_native_password":
+            out.append(("info", "%s uses mysql_native_password (off by default since MySQL 8.4)" % who))
+        if r.get("account_locked") == "N" and r.get("password_expired") == "Y":
+            out.append(("info", "%s has an expired password" % who))
+    return out
+
+
+SECRET_PATTERNS = [
+    ("password in a config line", re.compile(r"(?i)^\s*(password|pwd)\s*=\s*(?!@@ENV:)\S+")),
+    ("password on a command line", re.compile(r"(?i)\b(mysql\w*|mariadb\w*|xtrabackup|mariabackup)\b.*\s(-p\S+|--password=\S+)")),
+    ("MYSQL_PWD value", re.compile(r"MYSQL_PWD=\S+")),
+    ("literal password in SQL", re.compile(r"(?i)(identified\s+(with\s+\w+\s+)?by|(source|master)_password\s*=)\s*'(?!@@ENV:)[^']+'")),
+]
+
+
+def scan_file(path):
+    hits = []
+    try:
+        if os.path.getsize(path) > 5_000_000:
+            return hits
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return hits
+    if b"\0" in data:
+        return hits
+    for n, line in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
+        for kind, rx in SECRET_PATTERNS:
+            if rx.search(line):
+                hits.append((path, n, kind))
+    return hits
+
+
+def scan_secrets(paths):
+    home = os.path.expanduser("~")
+    if not paths:
+        paths = [os.path.join(home, f) for f in (".my.cnf", ".bash_history", ".zsh_history", ".mysql_history")]
+        paths.append(os.path.join(HOME(), "profiles.toml"))
+    hits, notes = [], []
+    for p in paths:
+        if os.path.isdir(p):
+            for base, dirs, files in os.walk(p):
+                dirs[:] = [d for d in dirs if d not in {".git", "node_modules", "__pycache__", ".venv"}]
+                for f in files:
+                    hits += scan_file(os.path.join(base, f))
+        elif os.path.isfile(p):
+            hits += scan_file(p)
+            if os.path.basename(p) == ".my.cnf" and os.stat(p).st_mode & 0o077:
+                notes.append("%s is readable by others (chmod 600)" % p)
+    for p in (secrets_path(), os.path.join(os.path.expanduser("~"), ".mylogin.cnf")):
+        if os.path.exists(p) and os.stat(p).st_mode & 0o077:
+            notes.append("%s is readable by others (chmod 600)" % p)
+    return hits, notes
+
+
+# ---- performance ----------------------------------------------------------------------------
+
+def slow_queries(prof, limit=10):
+    if q(prof, "SELECT @@performance_schema AS p")[0]["p"] not in ("1", "ON"):
+        raise Fail("performance_schema is off on this server; enable it in the config (restart needed) or read the slow query log")
+    rs = q(prof, "SELECT COALESCE(SCHEMA_NAME,'-') AS db, LEFT(DIGEST_TEXT,200) AS query, COUNT_STAR AS calls, "
+                 "ROUND(SUM_TIMER_WAIT/1e12,2) AS total_s, ROUND(AVG_TIMER_WAIT/1e12,4) AS avg_s, "
+                 "SUM_ROWS_EXAMINED AS examined, SUM_ROWS_SENT AS sent, SUM_NO_INDEX_USED AS no_index "
+                 "FROM performance_schema.events_statements_summary_by_digest "
+                 "WHERE DIGEST_TEXT IS NOT NULL AND COALESCE(SCHEMA_NAME,'') NOT IN ('mysql','sys','performance_schema','information_schema') "
+                 "ORDER BY SUM_TIMER_WAIT DESC LIMIT %d" % int(limit))
+    for r in rs:
+        flags = []
+        if int(r["no_index"] or 0) > 0:
+            flags.append("runs without a usable index")
+        if int(r["sent"] or 0) and int(r["examined"] or 0) / int(r["sent"]) > 100:
+            flags.append("reads %dx more rows than it returns" % (int(r["examined"]) / int(r["sent"])))
+        r["flags"] = "; ".join(flags)
+    return rs
+
+
+def locks(prof, flavor):
+    out = {"transactions": q(prof, "SELECT trx_id, trx_state, trx_started, TIMESTAMPDIFF(SECOND,trx_started,NOW()) AS age_s, "
+                                   "trx_mysql_thread_id AS thread, trx_rows_modified AS rows_mod, LEFT(COALESCE(trx_query,''),120) AS query "
+                                   "FROM information_schema.innodb_trx ORDER BY trx_started LIMIT 20")}
+    if flavor == "mariadb":
+        out["waits"] = q(prof, "SELECT r.trx_mysql_thread_id AS waiting_pid, b.trx_mysql_thread_id AS blocking_pid, "
+                               "TIMESTAMPDIFF(SECOND,r.trx_wait_started,NOW()) AS wait_s FROM information_schema.innodb_lock_waits w "
+                               "JOIN information_schema.innodb_trx r ON r.trx_id=w.requesting_trx_id "
+                               "JOIN information_schema.innodb_trx b ON b.trx_id=w.blocking_trx_id LIMIT 20")
+    else:
+        out["waits"] = q(prof, "SELECT waiting_pid, blocking_pid, wait_age_secs AS wait_s, locked_table, LEFT(waiting_query,100) AS waiting_query, "
+                               "LEFT(blocking_query,100) AS blocking_query FROM sys.innodb_lock_waits LIMIT 20")
+    st = run_sql(prof, "SHOW ENGINE INNODB STATUS").replace("\\n", "\n")
+    m = re.search(r"LATEST DETECTED DEADLOCK\n-+\n(.*?)\n-{8,}\n[A-Z ]+\n-{8,}", st, re.S)
+    out["deadlock"] = m.group(1).strip()[:3000] if m else ""
+    return out
+
+
+# ---- schema diff ----------------------------------------------------------------------------
+
+SYS = "('mysql','sys','information_schema','performance_schema')"
+
+
+def schema_snapshot(prof, schema=None):
+    where = "table_schema NOT IN %s" % SYS + (" AND table_schema='%s'" % sql_literal(schema) if schema else "")
+    snap = {"tables": {}, "columns": {}, "indexes": {}}
+    for r in q(prof, "SELECT table_schema AS s, table_name AS t, engine AS e FROM information_schema.tables WHERE table_type='BASE TABLE' AND %s" % where):
+        snap["tables"]["%s.%s" % (r["s"], r["t"])] = r["e"]
+    for r in q(prof, "SELECT table_schema AS s, table_name AS t, column_name AS c, column_type AS ty, is_nullable AS n, "
+                     "COALESCE(collation_name,'') AS co FROM information_schema.columns WHERE %s" % where):
+        snap["columns"]["%s.%s.%s" % (r["s"], r["t"], r["c"])] = "%s null=%s %s" % (r["ty"], r["n"], r["co"])
+    for r in q(prof, "SELECT table_schema AS s, table_name AS t, index_name AS i, GROUP_CONCAT(column_name ORDER BY seq_in_index) AS cols, "
+                     "MIN(non_unique) AS nu FROM information_schema.statistics WHERE %s GROUP BY table_schema, table_name, index_name" % where):
+        snap["indexes"]["%s.%s#%s" % (r["s"], r["t"], r["i"])] = "(%s) %s" % (r["cols"], "unique" if r["nu"] == "0" else "")
+    return snap
+
+
+def schema_diff(a, b, na="A", nb="B"):
+    out = []
+    for kind, one in (("tables", "table"), ("columns", "column"), ("indexes", "index")):
+        ka, kb = a[kind], b[kind]
+        out += ["only in %s, %s: %s" % (na, one, k) for k in sorted(set(ka) - set(kb))]
+        out += ["only in %s, %s: %s" % (nb, one, k) for k in sorted(set(kb) - set(ka))]
+        out += ["differs, %s %s: %s=%s  %s=%s" % (one, k, na, ka[k].strip(), nb, kb[k].strip())
+                for k in sorted(set(ka) & set(kb)) if ka[k].strip() != kb[k].strip()]
+    return out
+
+
+# ---- upgrade check --------------------------------------------------------------------------
+
+REMOVED_84 = ("binlog_transaction_dependency_tracking", "default_authentication_plugin", "expire_logs_days", "transaction_write_set_extraction",
+              "avoid_temporal_upgrade", "show_old_temporals", "log_bin_use_v1_events", "master_info_repository", "relay_log_info_repository",
+              "slave_rows_search_algorithms", "have_ssl", "have_openssl", "group_replication_ip_whitelist", "group_replication_recovery_complete_at")
+
+
+def upgrade_findings(flavor, ver, explicit, accounts, spatial):
+    """explicit: variables set in config or on the command line. Rules are for MySQL/Percona 8.0 to 8.4 only."""
+    if flavor == "mariadb":
+        return [("info", "No verified rule list for MariaDB in this tool. Read the release notes of every version between %d.%d and the target, "
+                         "take a tested backup, upgrade replicas first and run mariadb-upgrade after." % ver[:2])]
+    if ver[:2] >= (8, 4):
+        return [("info", "Already on %d.%d; nothing to check for 8.0 to 8.4." % ver[:2])]
+    if ver[:2] != (8, 0):
+        return [("warn", "%d.%d is not an upgrade source for 8.4; the supported path is 8.0 to 8.4 (confirm in the MySQL 'Upgrade Paths' page)" % ver[:2])]
+    out = [("warn", "variable %s is set explicitly and was removed in 8.4: the server will not start with it" % n) for n in REMOVED_84 if n in explicit]
+    out += [("warn", "%d account(s) use mysql_native_password, which is not enabled by default in 8.4 (re-enable with mysql_native_password=ON or move them to caching_sha2_password)" % accounts)] if accounts else []
+    out += [("warn", "%d spatial index(es): for 8.4.4 and later, drop them before the upgrade and recreate them after" % spatial)] if spatial else []
+    out += [("info", "defaults changed in 8.4 (review them): innodb_adaptive_hash_index OFF, innodb_change_buffering none, innodb_flush_method O_DIRECT, "
+                     "innodb_io_capacity 10000, innodb_log_buffer_size 64MiB; WAIT_UNTIL_SQL_THREAD_AFTER_GTIDS() is removed (use WAIT_FOR_EXECUTED_GTID_SET)"),
+            ("info", "also run the MySQL Shell upgrade checker (util.checkForServerUpgrade) and mysqlcheck --check-upgrade, and upgrade replicas before the source")]
+    return out
+
+
+def upgrade_check(prof):
+    r = q(prof, "SELECT VERSION() AS v, @@version_comment AS c")[0]
+    ver, fl = parse_version(r["v"]), flavor_of(r["v"], r["c"])
+    explicit, accounts, spatial = [], 0, 0
+    if fl != "mariadb" and ver[:2] == (8, 0):
+        names = ",".join("'%s'" % n for n in REMOVED_84)
+        explicit = [x["VARIABLE_NAME"].lower() for x in q(prof, "SELECT VARIABLE_NAME FROM performance_schema.variables_info "
+                    "WHERE VARIABLE_SOURCE <> 'COMPILED' AND LOWER(VARIABLE_NAME) IN (%s)" % names)]
+        accounts = int(q(prof, "SELECT COUNT(*) AS n FROM mysql.user WHERE plugin='mysql_native_password'")[0]["n"])
+        spatial = int(q(prof, "SELECT COUNT(*) AS n FROM information_schema.statistics WHERE index_type='SPATIAL'")[0]["n"])
+    return fl, r["v"], upgrade_findings(fl, ver, explicit, accounts, spatial)
+
+
+# ---- monitor --------------------------------------------------------------------------------
+
+def monitor_one(name, max_lag=30, max_conn_pct=85):
+    prof = get_profile(name)
+    try:
+        r = q(prof, "SELECT VERSION() AS v, @@version_comment AS c, @@max_connections AS mc, @@read_only AS ro")[0]
+        st = {x["Variable_name"]: x["Value"] for x in q(prof, "SHOW GLOBAL STATUS WHERE Variable_name IN ('Uptime','Threads_connected')")}
+        rs = replica_status(prof, max_lag)
+    except Fail as e:
+        return False, "DOWN %s: %s" % (name, str(e).splitlines()[0][:120])
+    problems = []
+    pct = int(st.get("Threads_connected", 0)) * 100 // max(1, int(r["mc"]))
+    if pct >= max_conn_pct:
+        problems.append("connections at %d%%" % pct)
+    if rs["verdict"] in ("BROKEN", "LAGGING"):
+        problems += rs["problems"]
+    line = "%s %s %s %s up=%sd conn=%s/%s ro=%s repl=%s" % ("OK" if not problems else "WARN", name, flavor_of(r["v"], r["c"]), r["v"],
+                                                           int(st.get("Uptime", 0)) // 86400, st.get("Threads_connected"), r["mc"], r["ro"], rs["verdict"])
+    return not problems, line + ("  <- " + "; ".join(problems) if problems else "")
+
+
+# ---- diagnose a broken replica --------------------------------------------------------------
+
+def diagnose(rep, src):
+    r = replica_status(rep)
+    if r["verdict"] in ("OK", "NONE"):
+        return r["verdict"], ["Nothing to repair: %s." % ("not a replica" if r["verdict"] == "NONE" else "replication is healthy")]
+    if r["verdict"] == "LAGGING":
+        return "LAGGING", ["Replication runs but is behind: %s" % "; ".join(r["problems"]),
+                           "Look for long transactions on the source, tables without primary key (/dynamia-mysql:inspect), a slow replica disk, and /dynamia-mysql:performance on the replica."]
+    st = rows(run_sql(rep, "SHOW REPLICA STATUS"))[0]
+    io_no, sql_no = int(st.get("Last_IO_Errno") or 0), int(st.get("Last_SQL_Errno") or st.get("Last_Errno") or 0)
+    text = r["errors"].lower()
+    if io_no == 1236 or "purged" in text:
+        return "REBUILD", ["The source no longer has the binary logs this replica needs (error 1236 or purged logs).",
+                           "Rebuild it with /dynamia-mysql:replica-setup. Skipping or editing positions would lose or duplicate data."]
+    if io_no in (1045, 1130, 2002, 2003, 2013, 2026) or (r["io"] != "Yes" and not sql_no):
+        return "CONNECTION", ["The IO thread cannot reach or log in to the source (error %s): %s" % (io_no, r["errors"] or "no message"),
+                              "Check network, firewall, the replication account and its host, TLS, and caching_sha2_password needing SSL or the public key.",
+                              "Nothing to skip here; fix the cause and START REPLICA (the user confirms)."]
+    vc = q(rep, "SELECT VERSION() AS v, @@version_comment AS c")[0]
+    fl = flavor_of(vc["v"], vc["c"])
+    steps = ["The SQL thread stopped on error %s: %s" % (sql_no, r["errors"] or "no message")]
+    if fl != "mariadb":
+        errant = clean_gtid(q(rep, "SELECT GTID_SUBTRACT('%s','%s') AS e" % (gtid_executed(rep, fl), gtid_executed(src, fl)))[0]["e"])
+        if errant:
+            return "ERRANT", steps + ["The replica has transactions the source never had (errant GTIDs): %s" % errant,
+                                      "Someone wrote on the replica. Find out who (keep read_only and super_read_only ON). Safest fix is a rebuild with /dynamia-mysql:replica-setup. "
+                                      "Injecting empty transactions hides the divergence; only the user may decide that."]
+    return "DIVERGED", steps + ["No errant GTIDs found, so the data differs without a GTID trace (a row changed or missing).",
+                                "Do not skip the transaction. Compare the table with the source, repair that table by hand, or rebuild the replica."]
+
+
+# ---- failover plan --------------------------------------------------------------------------
+
+def failover_blockers(cand, status, old_gtid, cand_gtid, missing, old_alive, flavor):
+    b = []
+    if status["verdict"] == "NONE":
+        b.append("the candidate is not a replica")
+    elif status["verdict"] == "BROKEN":
+        b.append("the candidate's replication is broken: " + "; ".join(status["problems"]))
+    if cand["vars"].get("log_bin") in ("OFF", "0"):
+        b.append("the candidate has the binary log off")
+    if cand["vars"].get("log_replica_updates", cand["vars"].get("log_slave_updates")) in ("OFF", "0"):
+        b.append("the candidate does not log replicated updates (log_replica_updates), so other replicas cannot follow it")
+    if old_alive:
+        if flavor == "mariadb":
+            if old_gtid != cand_gtid:
+                b.append("candidate position %s differs from the source %s" % (cand_gtid, old_gtid))
+        elif missing:
+            b.append("the candidate lacks these transactions of the source: %s" % missing)
+    return b
+
+
+def failover_runbook(flavor, old_alive, cand, others):
+    mdb = flavor == "mariadb"
+    chg = ("CHANGE MASTER TO MASTER_HOST='<new_host>', MASTER_USE_GTID=slave_pos" if mdb
+           else "CHANGE REPLICATION SOURCE TO SOURCE_HOST='<new_host>', SOURCE_AUTO_POSITION=1")
+    s = []
+    if old_alive:
+        s.append("[old source] stop writes: mysql-tool exec <old> \"SET GLOBAL read_only=ON\" then %s  [CONFIRM]\n   Tell the applications first; kill nothing without the user." %
+                 ("nothing more" if mdb else "mysql-tool exec <old> \"SET GLOBAL super_read_only=ON\""))
+        s.append("[candidate] wait until it has everything:\n   %s" % (
+            "compare gtid_current_pos on both until equal" if mdb else
+            "mysql-tool query %s \"SELECT WAIT_FOR_EXECUTED_GTID_SET('<old gtid_executed>', 30)\"   (0 = caught up)" % cand))
+    else:
+        s.append("The old source is DOWN. Anything it committed and had not sent is lost. Do not continue unless the user accepts that, in words.")
+    s += ["[candidate] mysql-tool exec %s \"STOP REPLICA\"  [CONFIRM]" % cand,
+          "[candidate] the user runs by hand (destructive, this tool refuses it): RESET REPLICA ALL",
+          "[candidate] open for writes: mysql-tool exec %s \"SET GLOBAL read_only=OFF\"  [CONFIRM]%s" % (cand, "" if mdb else "   (and super_read_only=OFF)")]
+    for o in others:
+        s.append("[%s] mysql-tool exec %s \"STOP REPLICA\" ; \"%s\" ; \"START REPLICA\"  [CONFIRM each]" % (o, o, chg))
+    if old_alive:
+        s.append("[old source] make it a replica of the candidate and keep it read_only: same CHANGE statement with SOURCE_USER and SOURCE_PASSWORD='@@ENV:REPL_PW@@'  [CONFIRM]")
+    s += ["The user repoints the applications (DNS, proxy, connection strings).",
+          "Verify every replica: mysql-tool replica-status <profile>. Keep the old source untouched until it is understood."]
+    return "\n".join("%d. %s" % (i, x) for i, x in enumerate(s, 1))
+
+
+def plan_failover(cand_name, old_name, other_names):
+    cand_p = get_profile(cand_name)
+    cand = facts(cand_p)
+    status = replica_status(cand_p)
+    fl = cand["flavor"]
+    old_alive, old_gtid, missing = False, "", ""
+    if old_name:
+        try:
+            old_p = get_profile(old_name)
+            old_gtid = gtid_executed(old_p, fl)
+            old_alive = True
+        except Fail:
+            pass
+    cand_gtid = gtid_executed(cand_p, fl)
+    if old_alive and fl != "mariadb":
+        missing = clean_gtid(q(cand_p, "SELECT GTID_SUBTRACT('%s','%s') AS m" % (old_gtid, cand_gtid))[0]["m"])
+    b = failover_blockers(cand, status, old_gtid, cand_gtid, missing, old_alive, fl)
+    out = ["# %s: %s promotes (%s)" % ("Switchover" if old_alive else "Failover", cand_name, fl), ""]
+    if b:
+        return "\n".join(out + ["## Blockers", ""] + ["- " + x for x in b]) + "\n", False
+    return "\n".join(out + [failover_runbook(fl, old_alive, cand_name, other_names)]) + "\n", True
+
+
+# ---- backup ---------------------------------------------------------------------------------
+
+def dir_bytes(path):
+    return sum(os.path.getsize(os.path.join(b, f)) for b, _, fs in os.walk(path) for f in fs)
+
+
+def backup_command(method, flavor, prof, cnf, target):
+    host, port, user = prof.get("host", "127.0.0.1"), str(prof.get("port", 3306)), prof["user"]
+    if method in ("xtrabackup", "mariabackup"):
+        names = ["xtrabackup"] if method == "xtrabackup" else ["mariadb-backup", "mariabackup"]
+        binary = next((shutil.which(n) for n in names if shutil.which(n)), None)
+        if not binary:
+            raise Fail("%s not found in PATH (run this on the database host)" % names[0])
+        return [binary, "--defaults-extra-file=%s" % cnf, "--backup", "--target-dir=%s" % target,
+                "--host=%s" % host, "--port=%s" % port, "--user=%s" % user]
+    names = ["mariadb-dump", "mysqldump"] if flavor == "mariadb" else ["mysqldump"]
+    binary = next((shutil.which(n) for n in names if shutil.which(n)), None)
+    if not binary:
+        raise Fail("%s not found in PATH" % names[0])
+    gt = ["--master-data=2", "--gtid"] if flavor == "mariadb" else ["--source-data=2", "--set-gtid-purged=ON"]
+    return [binary, "--defaults-extra-file=%s" % cnf, "--host=%s" % host, "--port=%s" % port, "--user=%s" % user,
+            "--single-transaction", "--routines", "--events", "--triggers", "--all-databases"] + gt + ["--result-file=%s" % os.path.join(target, "dump.sql")]
+
+
+def sha256_of(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def run_backup(name, method, target, dry_run=False):
+    import datetime
+    prof = get_profile(name)
+    f = facts(prof)
+    if method == "mariabackup" and f["flavor"] != "mariadb" or method == "xtrabackup" and f["flavor"] == "mariadb":
+        raise Fail("%s does not fit a %s server" % (method, f["flavor"]))
+    if os.path.exists(target) and (not os.path.isdir(target) or os.listdir(target)):
+        raise Fail("target %s exists and is not an empty directory; backups never overwrite" % target)
+    need = f["data_bytes"] * (1.1 if method != "dump" else 0.5)
+    parent = os.path.dirname(os.path.abspath(target.rstrip("/"))) or "/"
+    if not os.path.isdir(parent):
+        raise Fail("parent directory %s does not exist" % parent)
+    free = shutil.disk_usage(parent).free
+    if free < need:
+        raise Fail("not enough free space at %s: %s free, about %s needed" % (parent, human(free), human(need)))
+    if dry_run:
+        return "dry run: %s of data, %s free, would write to %s" % (human(f["data_bytes"]), human(free), target)
+    os.makedirs(target, mode=0o700, exist_ok=True)
+    pw = load_secrets().get(prof.get("secret", ""))
+    if pw is None:
+        raise Fail("profile %s needs a secret for backups" % name)
+    d = os.path.join(HOME(), "tmp")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    fd, cnf = tempfile.mkstemp(dir=d, suffix=".cnf")
+    started = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write('[client]\npassword="%s"\n' % pw.replace("\\", "\\\\").replace('"', '\\"'))
+        r = subprocess.run(backup_command(method, f["flavor"], prof, cnf, target), capture_output=True, text=True)
+    finally:
+        if os.path.exists(cnf):
+            os.unlink(cnf)
+    if r.returncode:
+        raise Fail("backup failed (target kept for inspection, do not use it): " + redact(r.stderr.strip()[-600:], [pw]))
+    man = {"method": method, "flavor": f["flavor"], "version": f["version"], "started": started,
+           "finished": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), "bytes": dir_bytes(target)}
+    if method == "dump":
+        man["sha256"] = sha256_of(os.path.join(target, "dump.sql"))
+    mfile = os.path.join(target, "backup-manifest.json")
+    fd = os.open(mfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(man, fh, indent=2)
+    return "backup finished: %s, %s at %s" % (method, human(man["bytes"]), target)
+
+
+def verify_backup(target):
+    problems = []
+    mfile = os.path.join(target, "backup-manifest.json")
+    if not os.path.isfile(mfile):
+        return ["no backup-manifest.json: this backup was not made by mysql-tool or did not finish"], {}
+    with open(mfile) as fh:
+        man = json.load(fh)
+    method = man.get("method")
+    if method == "dump":
+        dump = os.path.join(target, "dump.sql")
+        if not os.path.isfile(dump):
+            problems.append("dump.sql is missing")
+        else:
+            if sha256_of(dump) != man.get("sha256"):
+                problems.append("dump.sql changed since the backup (sha256 differs)")
+            with open(dump, "rb") as fh:
+                fh.seek(max(0, os.path.getsize(dump) - 400))
+                if b"Dump completed" not in fh.read():
+                    problems.append("dump.sql does not end with 'Dump completed': it is truncated")
+    else:
+        cp = os.path.join(target, "xtrabackup_checkpoints")
+        if not os.path.isfile(cp):
+            problems.append("xtrabackup_checkpoints is missing")
+        else:
+            with open(cp) as fh:
+                kv = dict(l.strip().split(" = ", 1) for l in fh if " = " in l)
+            man["state"] = kv.get("backup_type")
+            if kv.get("backup_type") not in ("full-backuped", "full-prepared"):
+                problems.append("unexpected backup_type %r" % kv.get("backup_type"))
+        if not os.path.isfile(os.path.join(target, "xtrabackup_binlog_info")):
+            problems.append("xtrabackup_binlog_info is missing (the replication position)")
+        if dir_bytes(target) < man.get("bytes", 0) * 0.99:
+            problems.append("the backup is smaller than when it was made")
+    return problems, man
+
+
 # ---- cli ------------------------------------------------------------------------------------
 
 def emit_rows(rs, as_json):
@@ -525,6 +1021,17 @@ def main(argv=None):
     p = sub.add_parser("exec"); p.add_argument("profile"); p.add_argument("sql")
     p = sub.add_parser("plan-replica"); p.add_argument("--source", required=True); p.add_argument("--replica", required=True)
     p.add_argument("--method", required=True, choices=("xtrabackup", "mariabackup", "clone", "dump"))
+    p = sub.add_parser("diagnose"); p.add_argument("replica"); p.add_argument("--source", required=True)
+    p = sub.add_parser("plan-failover"); p.add_argument("--candidate", required=True); p.add_argument("--old-source"); p.add_argument("--other", action="append", default=[])
+    p = sub.add_parser("backup"); p.add_argument("profile"); p.add_argument("--method", required=True, choices=("xtrabackup", "mariabackup", "dump"))
+    p.add_argument("--target", required=True); p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("verify-backup"); p.add_argument("target")
+    for n in ("audit-config", "audit-accounts", "locks", "upgrade-check"):
+        p = sub.add_parser(n); p.add_argument("profile")
+    p = sub.add_parser("slow-queries"); p.add_argument("profile"); p.add_argument("--limit", type=int, default=10)
+    p = sub.add_parser("schema-diff"); p.add_argument("--a", required=True); p.add_argument("--b", required=True); p.add_argument("--schema")
+    p = sub.add_parser("monitor"); p.add_argument("profiles", nargs="+"); p.add_argument("--max-lag", type=int, default=30)
+    p = sub.add_parser("scan-secrets"); p.add_argument("paths", nargs="*")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "profiles":
@@ -562,6 +1069,61 @@ def main(argv=None):
             text, ok = plan(a.source, a.replica, a.method)
             print(text)
             return 0 if ok else 1
+        elif a.cmd == "diagnose":
+            verdict, lines = diagnose(get_profile(a.replica), get_profile(a.source))
+            print("%s\n%s" % (verdict, "\n".join("- " + x for x in lines)))
+            return 0 if verdict in ("OK", "NONE") else 1
+        elif a.cmd == "plan-failover":
+            text, ok = plan_failover(a.candidate, a.old_source, a.other)
+            print(text)
+            return 0 if ok else 1
+        elif a.cmd == "backup":
+            print(run_backup(a.profile, a.method, a.target, a.dry_run))
+        elif a.cmd == "verify-backup":
+            problems, man = verify_backup(a.target)
+            print("\n".join(["- " + x for x in problems]) or "backup looks complete (%s %s, %s)" % (man.get("method"), man.get("version"), human(man.get("bytes", 0))))
+            if not problems:
+                print("This checks the files only. Prove it restores by starting a scratch instance from it (see /dynamia-mysql:backup).")
+            return 1 if problems else 0
+        elif a.cmd == "audit-config":
+            prof = get_profile(a.profile)
+            f = facts(prof)
+            res = audit_config(f["flavor"], all_vars(prof))
+            print("\n".join("[%s] %s" % x for x in res) or "no findings")
+        elif a.cmd == "audit-accounts":
+            res = audit_accounts(account_rows(get_profile(a.profile)))
+            print("\n".join("[%s] %s" % x for x in res) or "no findings")
+        elif a.cmd == "slow-queries":
+            for r in slow_queries(get_profile(a.profile), a.limit):
+                print("%ss total, %s calls, avg %ss [%s] %s\n    %s" % (r["total_s"], r["calls"], r["avg_s"], r["db"], r["flags"] or "no flag", r["query"]))
+        elif a.cmd == "locks":
+            prof = get_profile(a.profile)
+            res = locks(prof, facts(prof)["flavor"])
+            print("## Open transactions (oldest first)")
+            emit_rows(res["transactions"], False)
+            print("\n## Lock waits")
+            emit_rows(res["waits"], False)
+            print("\n## Latest deadlock\n" + (res["deadlock"] or "none recorded"))
+            print("\nThis tool never kills a session; the user decides about KILL <pid>.")
+        elif a.cmd == "schema-diff":
+            res = schema_diff(schema_snapshot(get_profile(a.a), a.schema), schema_snapshot(get_profile(a.b), a.schema), a.a, a.b)
+            print("\n".join(res[:200]) + ("\n... %d more" % (len(res) - 200) if len(res) > 200 else "") if res else "schemas match (tables, columns, indexes)")
+            return 1 if res else 0
+        elif a.cmd == "upgrade-check":
+            fl, ver, res = upgrade_check(get_profile(a.profile))
+            print("%s %s\n%s" % (fl, ver, "\n".join("[%s] %s" % x for x in res)))
+        elif a.cmd == "monitor":
+            results = [monitor_one(n, a.max_lag) for n in a.profiles]
+            print("\n".join(x[1] for x in results))
+            return 0 if all(x[0] for x in results) else 1
+        elif a.cmd == "scan-secrets":
+            hits, notes = scan_secrets(a.paths)
+            for path, n, kind in hits:
+                print("%s:%d: %s" % (path, n, kind))
+            for n in notes:
+                print("note: " + n)
+            print("%d finding(s); values are never printed" % len(hits))
+            return 1 if hits or notes else 0
     except Fail as e:
         print("mysql-tool: %s" % e, file=sys.stderr)
         return 2

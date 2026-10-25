@@ -48,7 +48,8 @@ class GuardTest(unittest.TestCase):
                   "zcat dump.sql.gz | mysql db", "xtrabackup --move-back --target-dir=/b", "mariadb-backup --copy-back --target-dir=/b",
                   "mysql-tool exec rep \"CLONE INSTANCE FROM 'c'@'h':3306 IDENTIFIED BY '@@ENV:CLONE_PW@@'\"",
                   "mysql-tool exec rep \"STOP REPLICA\"", "mysql-tool exec rep \"SET GLOBAL gtid_purged='x'\"",
-                  "mysql -e 'ALTER TABLE t ADD c int'", "mysql -e \"DELETE FROM t WHERE id=1\"", "mysqld --initialize"):
+                  "mysql -e 'ALTER TABLE t ADD c int'", "xtrabackup --backup --target-dir=/b", "mariadb-backup --prepare --target-dir=/b",
+                  "mysqldump --all-databases", "mysql-tool backup src --method dump --target /b", "mysql -e \"DELETE FROM t WHERE id=1\"", "mysqld --initialize"):
             self.assertEqual(run(c), "ask", c)
 
     def test_secrets_file_is_protected(self):

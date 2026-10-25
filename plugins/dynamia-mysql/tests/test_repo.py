@@ -10,7 +10,7 @@ SKILLS = os.path.join(ROOT, "skills")
 class RepoTest(unittest.TestCase):
     def test_skill_front_matter(self):
         names = sorted(os.listdir(SKILLS))
-        self.assertEqual(len(names), 5)
+        self.assertEqual(len(names), 13)
         for name in names:
             with open(os.path.join(SKILLS, name, "SKILL.md"), encoding="utf-8") as fh:
                 text = fh.read()
@@ -31,7 +31,7 @@ class RepoTest(unittest.TestCase):
         for name in os.listdir(SKILLS):
             with open(os.path.join(SKILLS, name, "SKILL.md"), encoding="utf-8") as fh:
                 text = fh.read()
-            for sub in re.findall(r"mysql-tool (?:\S+ )?(secret-set|secret-gen|info|inspect|replica-status|plan-replica|query|exec|profiles|secrets)\b", text):
+            for sub in re.findall(r"mysql-tool ([a-z][a-z-]*)\b", text):
                 self.assertIn('"%s"' % sub, tool, sub)
 
     def test_no_literal_passwords_in_docs(self):

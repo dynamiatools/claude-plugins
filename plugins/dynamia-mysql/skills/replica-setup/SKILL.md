@@ -5,7 +5,7 @@ description: Builds a new replica of a MySQL, Percona Server or MariaDB source w
 
 # replica-setup
 
-Needs profiles for the source and the new replica (`/dynamia-mysql:connect`), and a decision on the method. Default: physical backup plus GTID. CLONE is MySQL/Percona only and erases the target. A dump is for small data.
+Needs profiles for the source and the new replica (`/dynamia-mysql:connect`), a decision on the method, and a backup you trust (`/dynamia-mysql:backup`). Default: physical backup plus GTID. CLONE is MySQL/Percona only and erases the target. A dump is for small data.
 
 ## Rules
 

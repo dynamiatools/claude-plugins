@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+import json, os, sys
+a = sys.argv[1:]
+assert a[0].startswith("--defaults-extra-file="), a
+with open(a[0].split("=", 1)[1]) as fh:
+    assert "password" in fh.read()
+assert not any("pass" in x.lower() for x in a), a
+t = next(x.split("=", 1)[1] for x in a if x.startswith("--target-dir="))
+os.makedirs(t, exist_ok=True)
+open(os.path.join(t, "xtrabackup_checkpoints"), "w").write("backup_type = full-backuped\nfrom_lsn = 0\n")
+open(os.path.join(t, "xtrabackup_binlog_info"), "w").write("bin.000001\t157\tuuid:1-10\n")
+open(os.path.join(t, "ibdata1"), "wb").write(b"x" * 2048)

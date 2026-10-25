@@ -12,6 +12,7 @@ description: Checks the health of MySQL, Percona or MariaDB replication with mys
    - SQL thread stopped with a duplicate key or missing row: the replica diverged. Do not skip the transaction. Find who wrote on the replica (`read_only` off?) and tell the user.
    - Error about purged binary logs: the replica is too far behind; it needs a rebuild, see `/dynamia-mysql:replica-setup`.
    - Lag that grows: single-thread apply, big transactions, tables without primary key (`/dynamia-mysql:inspect`), slow disk on the replica.
-4. `STOP REPLICA`, `START REPLICA`, `RESET REPLICA`, `SET GLOBAL sql_replica_skip_counter` and any change of the source are critical: propose them, explain the risk, and run them only after the user says yes. `mysql-tool exec` allows only the replication statements and refuses everything destructive; the guard hook asks the user as well.
+4. If it is broken, run `/dynamia-mysql:repair` for the cause. Promoting a replica is `/dynamia-mysql:failover`.
+5. `STOP REPLICA`, `START REPLICA`, `RESET REPLICA`, `SET GLOBAL sql_replica_skip_counter` and any change of the source are critical: propose them, explain the risk, and run them only after the user says yes. `mysql-tool exec` allows only the replication statements and refuses everything destructive; the guard hook asks the user as well.
 
 Report the numbers you saw. If a replica was not checked, say so.

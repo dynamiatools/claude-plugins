@@ -43,6 +43,8 @@ ASK = [
     (r"\b(stop|start)\s+(replica|slave)\b|\bchange\s+(replication\s+source|master)\s+to\b|\breset\s+(replica|slave)\b",
      "replication change"),
     (r"\bset\s+(global|persist)\b", "SET GLOBAL / PERSIST"),
+    (r"\b(xtrabackup|mariabackup|mariadb-backup)\b.*--(backup|prepare)\b|\bmysql-tool\s+backup\b|\b(mysqldump|mariadb-dump)\b",
+     "taking or preparing a backup (heavy I/O on the server, writes files)"),
     (r"\b(create|alter|drop|rename)\s+(user|table|index|database|schema|view|trigger|event|procedure|function)\b"
      r"|\b(grant|revoke|insert|update|delete|replace|load\s+data|kill)\b\s", "SQL that changes data, schema or accounts"),
 ]
