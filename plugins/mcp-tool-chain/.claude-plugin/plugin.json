@@ -1,0 +1,11 @@
+{
+  "name": "mcp-tool-chain",
+  "version": "0.1.0",
+  "author": {
+    "name": "Mario Serrano"
+  },
+  "description": "Chain many MCP tool calls in one short Python script, so intermediate results never pass through the model's context.",
+  "license": "MIT",
+  "homepage": "https://github.com/dynamiatools/claude-plugins/tree/master/plugins/mcp-tool-chain",
+  "repository": "https://github.com/dynamiatools/claude-plugins"
+}

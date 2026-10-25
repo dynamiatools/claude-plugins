@@ -48,6 +48,11 @@
       "name": "dynamia-docs",
       "source": "./plugins/dynamia-docs",
       "description": "Documentation for software projects: READMEs, architecture decision records, API and code docs, changelogs, runbooks, diagrams, and audits that keep docs true to the code."
+    },
+    {
+      "name": "mcp-tool-chain",
+      "source": "./plugins/mcp-tool-chain",
+      "description": "Chain many MCP tool calls in one short Python script, so intermediate results never pass through the model's context. Imports the stdio MCP servers it finds."
     }
   ]
 }

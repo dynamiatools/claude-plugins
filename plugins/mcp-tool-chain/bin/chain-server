@@ -1,0 +1,477 @@
+#!/usr/bin/env python3
+"""chain-server: an MCP server that chains calls to other MCP servers in one Python script.
+
+It exposes two tools, `describe` and `run`. `run` executes a short Python script in a
+child process; inside it `tools.<server>.<tool>(**args)` calls a tool of a configured
+upstream MCP server (stdio) through this process. Only what the script prints goes back
+to the model. Upstream credentials stay here: the child gets a bare environment.
+
+Config: $MCP_TOOL_CHAIN_CONFIG or ~/.config/mcp-tool-chain/servers.json
+  {"timeout": 120, "require_sandbox": false, "import": ["claude", "project"], "exclude": ["name"],
+   "servers": {"name": {"command": "...", "args": [], "env": {}, "allow": ["tool", "*"]}}}
+A tool is callable if it is read-only (annotations.readOnlyHint) or listed in `allow`.
+Stdio servers found in other MCP configs are imported (see SOURCES); `servers` wins over them.
+"""
+import json
+import os
+import queue
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+
+PROTOCOL = "2025-06-18"
+CALL_TIMEOUT = 60
+RUN_TIMEOUT = 120
+MAX_OUT = 20000
+MAX_CODE = 50000
+
+RUNNER = r'''
+import json, os, sys
+_w = os.fdopen(int(sys.argv[1]), "w")
+_r = os.fdopen(int(sys.argv[2]), "r")
+
+class ToolError(Exception):
+    pass
+
+def _call(server, tool, args):
+    _w.write(json.dumps({"server": server, "tool": tool, "args": args}) + "\n")
+    _w.flush()
+    reply = json.loads(_r.readline())
+    if not reply["ok"]:
+        raise ToolError(reply["error"])
+    return reply["value"]
+
+class _Bag:
+    def __init__(self, what, names, make):
+        self._what, self._names, self._make = what, names, make
+    def __getattr__(self, name):
+        if name.startswith("__") or name not in self._names:
+            raise AttributeError(f"no {self._what} '{name}'; available: {', '.join(sorted(self._names))}")
+        return self._make(name)
+    __getitem__ = __getattr__
+
+def _server(catalog, name):
+    return _Bag("tool", catalog[name], lambda tool: lambda **kw: _call(name, tool, kw))
+
+job = json.loads(_r.readline())
+tools = _Bag("server", job["tools"], lambda name: _server(job["tools"], name))
+exec(compile(job["code"], "<chain>", "exec"), {"tools": tools, "ToolError": ToolError, "__name__": "__main__"})
+'''
+
+
+class ChainError(Exception):
+    pass
+
+
+def config_path():
+    return os.environ.get("MCP_TOOL_CHAIN_CONFIG") or os.path.expanduser("~/.config/mcp-tool-chain/servers.json")
+
+
+SOURCES = ["desktop", "cursor", "vscode", "claude", "project"]  # later wins
+
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def servers_in(doc, key="mcpServers"):
+    found = doc.get(key) if isinstance(doc, dict) else None
+    return found if isinstance(found, dict) else {}
+
+
+def source_entries(source, home, cwd):
+    """Raw MCP server entries of one source: Claude Desktop, Cursor, VS Code, Claude Code, a project's .mcp.json."""
+    if source == "desktop":
+        return {**servers_in(read_json(os.path.join(home, "Library/Application Support/Claude/claude_desktop_config.json"))),
+                **servers_in(read_json(os.path.join(home, ".config/Claude/claude_desktop_config.json")))}
+    if source == "cursor":
+        return servers_in(read_json(os.path.join(home, ".cursor/mcp.json")))
+    if source == "vscode":
+        return servers_in(read_json(os.path.join(cwd, ".vscode/mcp.json")), "servers")
+    if source == "claude":
+        doc = read_json(os.path.join(home, ".claude.json"))
+        return {**servers_in(doc), **servers_in(servers_in(doc, "projects").get(cwd, {}))}
+    if source == "project":
+        return servers_in(read_json(os.path.join(cwd, ".mcp.json")))
+    raise ChainError(f"unknown import source '{source}' (use {', '.join(SOURCES)})")
+
+
+def expand(value):
+    """${VAR} and ${VAR:-default}, as in .mcp.json."""
+    return re.sub(r"\$\{(\w+)(?::-([^}]*))?\}", lambda m: os.environ.get(m[1], m[2] or ""), str(value))
+
+
+def discover(sources, home, cwd, exclude=()):
+    """-> ({name: spec}, [names skipped because they are not stdio]). Never imports this server itself."""
+    found = {}
+    for source in sources:
+        found.update(source_entries(source, home, cwd))
+    servers, skipped = {}, []
+    for name, raw in found.items():
+        if name in exclude or not isinstance(raw, dict):
+            continue
+        if raw.get("type", "stdio") != "stdio" or "command" not in raw:
+            skipped.append(name)
+        elif name != "tool-chain" and "chain-server" not in " ".join(map(str, raw.get("args", []))):
+            servers[name] = {"command": expand(raw["command"]), "args": [expand(a) for a in raw.get("args", [])],
+                             "env": {k: expand(v) for k, v in (raw.get("env") or {}).items()}}
+    return servers, skipped
+
+
+def load_config(path):
+    cfg = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                cfg = json.load(f)
+        except (OSError, ValueError) as e:
+            raise ChainError(f"cannot read config {path}: {e}")
+    if not isinstance(cfg, dict) or not isinstance(cfg.get("servers", {}), dict):
+        raise ChainError(f"config {path}: 'servers' must be an object")
+    sources = cfg.get("import", SOURCES)
+    sources = SOURCES if sources is True else sources or []
+    imported, cfg["skipped"] = discover(sources, os.path.expanduser("~"), os.getcwd(), cfg.get("exclude", []))
+    cfg["servers"] = {**imported, **cfg.get("servers", {})}
+    return cfg
+
+
+def safe(name):
+    return re.sub(r"\W", "_", name)
+
+
+def allowed(spec, tool):
+    allow = spec.get("allow", [])
+    return "*" in allow or tool["name"] in allow or tool.get("annotations", {}).get("readOnlyHint") is True
+
+
+def unwrap(result):
+    """MCP tool result -> (ok, value-or-error-text)."""
+    texts = [c.get("text", "") for c in result.get("content", []) if c.get("type") == "text"]
+    if result.get("isError"):
+        return False, "\n".join(texts) or "tool failed"
+    if "structuredContent" in result:
+        return True, result["structuredContent"]
+    if len(texts) == 1:
+        try:
+            return True, json.loads(texts[0])
+        except ValueError:
+            return True, texts[0]
+    return True, texts or result.get("content", [])
+
+
+def net_isolation():
+    """True when `unshare -rn` works here (needs unprivileged user namespaces)."""
+    if not shutil.which("unshare"):
+        return False
+    return subprocess.run(["unshare", "-rn", "true"], capture_output=True).returncode == 0
+
+
+class Upstream:
+    """A stdio MCP server we talk to as a client."""
+
+    def __init__(self, name, spec):
+        self.name, self.spec = name, spec
+        self.proc = None
+        self.inbox = queue.Queue()
+        self.next_id = 0
+        self.tool_list = None
+
+    def start(self):
+        spec = self.spec
+        try:
+            self.proc = subprocess.Popen(
+                [spec["command"], *spec.get("args", [])], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, env={**os.environ, **spec.get("env", {})})
+        except (KeyError, OSError) as e:
+            raise ChainError(f"cannot start server '{self.name}': {e}")
+        threading.Thread(target=self._read, daemon=True).start()
+        try:
+            self.request("initialize", {"protocolVersion": PROTOCOL, "capabilities": {},
+                                        "clientInfo": {"name": "mcp-tool-chain", "version": "0.1.0"}}, CALL_TIMEOUT)
+        except ChainError:
+            self.close()
+            self.proc = None
+            raise
+        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def _read(self):
+        for line in self.proc.stdout:
+            try:
+                self.inbox.put(json.loads(line))
+            except ValueError:
+                pass
+        self.proc.stdout.close()
+        self.inbox.put(None)
+
+    def _send(self, msg):
+        try:
+            self.proc.stdin.write(json.dumps(msg) + "\n")
+            self.proc.stdin.flush()
+        except OSError:
+            raise ChainError(f"server '{self.name}' exited")
+
+    def request(self, method, params, timeout):
+        self.next_id += 1
+        rid = self.next_id
+        self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                msg = self.inbox.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                raise ChainError(f"server '{self.name}': {method} timed out after {timeout:.0f}s")
+            if msg is None:
+                raise ChainError(f"server '{self.name}' exited")
+            if "method" in msg:
+                if "id" in msg:  # a request from the server: we implement nothing
+                    self._send({"jsonrpc": "2.0", "id": msg["id"],
+                                "error": {"code": -32601, "message": "not supported"}})
+            elif msg.get("id") == rid:
+                if "error" in msg:
+                    raise ChainError(f"server '{self.name}': {msg['error'].get('message', msg['error'])}")
+                return msg["result"]
+
+    def tools(self):
+        if self.proc is None:
+            self.start()
+        if self.tool_list is None:
+            found, cursor = [], None
+            while True:
+                res = self.request("tools/list", {"cursor": cursor} if cursor else {}, CALL_TIMEOUT)
+                found += res.get("tools", [])
+                cursor = res.get("nextCursor")
+                if not cursor:
+                    break
+            self.tool_list = found
+        return self.tool_list
+
+    def call(self, tool, args, timeout):
+        return self.request("tools/call", {"name": tool, "arguments": args}, timeout)
+
+    def close(self):
+        if self.proc:
+            self.proc.stdin.close()
+            if self.proc.poll() is None:
+                self.proc.terminate()
+                self.proc.wait(5)
+
+
+def signature(server, tool):
+    props = tool.get("inputSchema", {}).get("properties", {})
+    required = set(tool.get("inputSchema", {}).get("required", []))
+    parts = []
+    for key, p in props.items():
+        t = p.get("type", "any")
+        t = "|".join(t) if isinstance(t, list) else t
+        parts.append(f"{key}{'' if key in required else '?'}: {t}")
+    doc = (tool.get("description") or "").strip().splitlines()
+    return f"{server}.{safe(tool['name'])}({', '.join(parts)})" + (f" -- {doc[0][:100]}" if doc else "")
+
+
+class Chain:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.upstreams = {n: Upstream(n, s) for n, s in cfg["servers"].items()}
+        self.catalog = {}  # safe server -> safe tool -> (Upstream, real tool name)
+        self.errors = {}  # safe server -> why it could not start
+
+    def visible(self, names):
+        """{safe server: [(tool, allowed?)]} for the given safe names; starts them lazily, notes failures."""
+        out = {}
+        for name, up in self.upstreams.items():
+            if safe(name) in names:
+                try:
+                    out[safe(name)] = [(t, allowed(up.spec, t)) for t in up.tools()]
+                except ChainError as e:
+                    self.errors[safe(name)] = str(e)
+        return out
+
+    def describe(self, server=None):
+        if not self.upstreams:
+            return f"No servers found. Add them to {config_path()} or to an MCP config (see /mcp-tool-chain:setup)."
+        names = {safe(n) for n in self.upstreams if not server or server in (n, safe(n))}
+        lines = []
+        for name, tools in self.visible(names).items():
+            ok = [t for t, a in tools if a]
+            lines.append(f"## {name} ({len(ok)} of {len(tools)} tools callable)")
+            lines += [signature(name, t) for t in ok]
+            if len(ok) < len(tools):
+                lines.append(f"(not callable, add to 'allow' to use: {', '.join(t['name'] for t, a in tools if not a)})")
+        lines += [f"## {name}: unavailable ({err})" for name, err in self.errors.items() if name in names]
+        if not server and self.cfg.get("skipped"):
+            lines.append(f"(not importable, not stdio: {', '.join(self.cfg['skipped'])})")
+        return "\n".join(lines) or f"No server named '{server}'."
+
+    def build_catalog(self, code):
+        """Starts only the servers the script mentions (all of them if it names none)."""
+        used = {a or b for a, b in re.findall(r"""\btools\s*(?:\.\s*(\w+)|\[\s*['"](\w+)['"])""", code)}
+        names = {safe(n) for n in self.upstreams} & used or {safe(n) for n in self.upstreams}
+        self.catalog = {}
+        for name, tools in self.visible(names).items():
+            up = self.upstreams[next(n for n in self.upstreams if safe(n) == name)]
+            self.catalog[name] = {safe(t["name"]): (up, t["name"]) for t, a in tools if a}
+
+    def dispatch(self, req, timeout):
+        try:
+            up, tool = self.catalog[req["server"]][req["tool"]]
+            if not isinstance(req.get("args"), dict):
+                raise ChainError("arguments must be keyword arguments")
+            ok, value = unwrap(up.call(tool, req["args"], timeout))
+        except (KeyError, ChainError) as e:
+            ok, value = False, f"{type(e).__name__}: {e}"
+        return {"ok": ok, "value": value} if ok else {"ok": False, "error": value}
+
+    def run(self, code):
+        """-> (text, is_error)"""
+        if len(code) > MAX_CODE:
+            return f"script too long ({len(code)} > {MAX_CODE} chars)", True
+        isolated = net_isolation()
+        if not isolated and self.cfg.get("require_sandbox"):
+            return "refusing to run: no network isolation here and require_sandbox is true", True
+        self.build_catalog(code)
+        timeout = float(self.cfg.get("timeout", RUN_TIMEOUT))
+        req_r, req_w = os.pipe()
+        resp_r, resp_w = os.pipe()
+        cmd = [sys.executable, "-I", "-c", RUNNER, str(req_w), str(resp_r)]
+        if isolated:
+            cmd = ["unshare", "-rn", *cmd]
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                pass_fds=(req_w, resp_r), env={"PATH": os.environ.get("PATH", "")})
+        os.close(req_w)
+        os.close(resp_r)
+        out = bytearray()
+        truncated = []
+
+        def drain():
+            for chunk in iter(lambda: proc.stdout.read1(4096), b""):
+                if len(out) < MAX_OUT:
+                    out.extend(chunk[:MAX_OUT - len(out)])
+                else:
+                    truncated.append(True)
+
+        requests = queue.Queue()
+
+        def listen():
+            with os.fdopen(req_r) as f:
+                for line in f:
+                    requests.put(line)
+            requests.put(None)
+
+        threads = [threading.Thread(target=drain, daemon=True), threading.Thread(target=listen, daemon=True)]
+        for t in threads:
+            t.start()
+        timed_out = False
+        deadline = time.monotonic() + timeout
+        with os.fdopen(resp_w, "w") as w:
+            job = {"code": code, "tools": {s: list(t) for s, t in self.catalog.items()}}
+            w.write(json.dumps(job) + "\n")
+            w.flush()
+            while True:
+                left = deadline - time.monotonic()
+                try:
+                    line = requests.get(timeout=max(0.0, left)) if left > 0 else queue.Empty
+                except queue.Empty:
+                    line = queue.Empty
+                if line is queue.Empty:
+                    timed_out = True
+                    proc.kill()
+                    break
+                if line is None:
+                    break
+                try:
+                    w.write(json.dumps(self.dispatch(json.loads(line), min(CALL_TIMEOUT, left))) + "\n")
+                    w.flush()
+                except (BrokenPipeError, ValueError):
+                    break
+        proc.wait()
+        for t in threads:
+            t.join(2)
+        proc.stdout.close()
+        text = out.decode(errors="replace")
+        notes = []
+        if truncated or len(out) >= MAX_OUT:
+            notes.append(f"output truncated at {MAX_OUT} bytes")
+        if timed_out:
+            notes.append(f"killed after {timeout:.0f}s timeout")
+        elif proc.returncode:
+            notes.append(f"exit code {proc.returncode}")
+        if not isolated:
+            notes.append("no network isolation on this machine")
+        return text + "".join(f"\n[{n}]" for n in notes), bool(timed_out or proc.returncode)
+
+    def close(self):
+        for up in self.upstreams.values():
+            up.close()
+
+
+TOOLS = [
+    {"name": "describe",
+     "description": "List the tools of the configured MCP servers as Python signatures, e.g. "
+                    "github.search_issues(query: string). Call it before `run`.",
+     "inputSchema": {"type": "object", "properties": {"server": {"type": "string", "description": "only this server"}}}},
+    {"name": "run",
+     "description": "Run a short Python script that chains MCP tool calls: tools.<server>.<tool>(**args) "
+                    "returns the parsed result (dict, list or text) and raises ToolError on failure. "
+                    "Loop, filter and join in the script and print only what you need; stdout is the result. "
+                    "Standard library only. Use describe first.",
+     "inputSchema": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}},
+]
+
+
+def handle(chain, msg):
+    method, rid = msg.get("method"), msg.get("id")
+    if rid is None:
+        return None
+    if method == "initialize":
+        result = {"protocolVersion": msg.get("params", {}).get("protocolVersion", PROTOCOL),
+                  "capabilities": {"tools": {}}, "serverInfo": {"name": "tool-chain", "version": "0.1.0"}}
+    elif method == "ping":
+        result = {}
+    elif method == "tools/list":
+        result = {"tools": TOOLS}
+    elif method == "tools/call":
+        params = msg.get("params", {})
+        args = params.get("arguments") or {}
+        try:
+            if params.get("name") == "describe":
+                text, err = chain.describe(args.get("server")), False
+            elif params.get("name") == "run":
+                text, err = chain.run(args.get("code", ""))
+            else:
+                text, err = f"unknown tool '{params.get('name')}'", True
+        except ChainError as e:
+            text, err = str(e), True
+        result = {"content": [{"type": "text", "text": text}], "isError": err}
+    else:
+        return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"unknown method {method}"}}
+    return {"jsonrpc": "2.0", "id": rid, "result": result}
+
+
+def main():
+    try:
+        chain = Chain(load_config(config_path()))
+    except ChainError as e:
+        print(f"chain-server: {e}", file=sys.stderr)
+        return 1
+    try:
+        for line in sys.stdin:
+            try:
+                reply = handle(chain, json.loads(line))
+            except ValueError:
+                continue
+            if reply:
+                print(json.dumps(reply), flush=True)
+    finally:
+        chain.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
