@@ -58,6 +58,11 @@
       "name": "dynamia-remix",
       "source": "./plugins/dynamia-remix",
       "description": "Remix an app you admire into your own product, clean-room: map it, plan and rebuild it, score parity, read what its users hate, and rebrand so nothing of the original is left."
+    },
+    {
+      "name": "dynamia-mysql",
+      "source": "./plugins/dynamia-mysql",
+      "description": "Safe MySQL, Percona Server and MariaDB work: connect without leaking passwords, inspect a database, check replication and build a new replica, with a guard against destructive statements."
     }
   ]
 }

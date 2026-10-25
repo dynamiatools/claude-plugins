@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""PreToolUse hook (Bash, Read) for MySQL, Percona Server and MariaDB work.
+
+Silent unless the command touches a MySQL-family tool or a datadir. Then:
+  deny  (exit 2)  a password in argv or SQL text, reading the secrets file, and destructive
+                  statements (DROP, TRUNCATE, DELETE/UPDATE without WHERE, RESET BINARY LOGS,
+                  PURGE BINARY LOGS, rm of a datadir)
+  ask   (JSON)    anything else that changes state: any write SQL, restart or stop of the server,
+                  moving or copying a datadir, restoring a dump or backup, CLONE, replication changes
+Fails open: any error means exit 0. It is a guard against mistakes, not a sandbox: a command built
+from pieces at run time can slip past a text match.
+"""
+import json
+import re
+import sys
+
+I = re.I
+RELEVANT = re.compile(r"(?<![\w-])(mysql\w*|mariadb\w*|mariabackup|xtrabackup|percona\w*|mysql-tool)(?![\w])"
+                      r"|/var/lib/(mysql|mariadb)|dynamia-mysql", I)
+READONLY_FIRST = {"git", "grep", "rg", "ls", "head", "man", "which", "type"}
+COMPOUND = re.compile(r"[|;&<>`]|\$\(")
+DATADIR = r"(/var/lib/(mysql|mariadb)|/var/lib/mysql-\w+|\bdatadir\b)"
+
+DENY = [
+    (r"(?<![\w-])-p(?!\s|$)\S", "a password on the command line (-pSECRET)"),
+    (r"--password=\S", "a password on the command line (--password=...)"),
+    (r"\bMYSQL_PWD\s*=", "MYSQL_PWD in the command"),
+    (r"identified\s+(with\s+\w+\s+)?by\s+'(?!@@ENV:)", "a literal password in SQL (use '@@ENV:NAME@@')"),
+    (r"(source|master)_password\s*=\s*'(?!@@ENV:)", "a literal password in SQL (use '@@ENV:NAME@@')"),
+    (r"\bdrop\s+(database|schema|table)\b", "DROP DATABASE/SCHEMA/TABLE"),
+    (r"\btruncate\b", "TRUNCATE"),
+    (r"\breset\s+(binary\s+logs\s+and\s+gtids|master)\b", "RESET BINARY LOGS AND GTIDS / RESET MASTER"),
+    (r"\bpurge\s+(binary|master)\s+logs\b", "PURGE BINARY LOGS"),
+    (r"\brm\s+(-\S+\s+)*\S*" + DATADIR, "removing a datadir"),
+]
+ASK = [
+    (r"\b(systemctl|service)\b.*\b(restart|stop|start|reload|kill)\b|\bmysqladmin\b.*\b(shutdown|kill)\b",
+     "start, stop or restart of the server"),
+    (r"\b(mv|cp|rsync|chown|chmod|ln|tar|scp)\b.*" + DATADIR, "moving or changing a datadir"),
+    (r"--(copy|move)-back\b|\bmysqld\b.*--initialize|mysql_upgrade|mariadb-install-db", "restore or initialize a datadir"),
+    (r"\bmysql\w*\b[^|;&]*<\s*\S|\|\s*(mysql|mariadb)\b|(^|\s)(source|\\\.)\s+\S+\.sql", "restoring a dump into a server"),
+    (r"\bclone\s+instance\b|\binstall\s+plugin\b", "CLONE or plugin install"),
+    (r"\b(stop|start)\s+(replica|slave)\b|\bchange\s+(replication\s+source|master)\s+to\b|\breset\s+(replica|slave)\b",
+     "replication change"),
+    (r"\bset\s+(global|persist)\b", "SET GLOBAL / PERSIST"),
+    (r"\b(create|alter|drop|rename)\s+(user|table|index|database|schema|view|trigger|event|procedure|function)\b"
+     r"|\b(grant|revoke|insert|update|delete|replace|load\s+data|kill)\b\s", "SQL that changes data, schema or accounts"),
+]
+SECRETS = re.compile(r"dynamia-mysql/secrets\.env|(^|/)secrets\.env$")
+
+
+def check(tool, ti):
+    if tool == "Read":
+        return ("deny", ["reading the secrets file"]) if SECRETS.search(ti.get("file_path", "")) else None
+    cmd = ti.get("command", "")
+    if SECRETS.search(cmd) and "mysql-tool" not in cmd:
+        return "deny", ["reading the secrets file"]
+    if not RELEVANT.search(cmd):
+        return None
+    first = cmd.split(None, 1)[0] if cmd.strip() else ""
+    if first in READONLY_FIRST and not COMPOUND.search(cmd):
+        return None
+    deny = [why for rx, why in DENY if re.search(rx, cmd, 0 if rx.startswith("(?<![\\w-])-p") else I)]
+    if re.search(r"\b(delete\s+from|update)\b", cmd, I) and not re.search(r"\bwhere\b", cmd, I):
+        deny.append("DELETE or UPDATE without WHERE")
+    if deny:
+        return "deny", deny
+    ask = [why for rx, why in ASK if re.search(rx, cmd, I)]
+    return ("ask", ask) if ask else None
+
+
+def main():
+    try:
+        data = json.load(sys.stdin)
+        res = check(data.get("tool_name", ""), data.get("tool_input") or {})
+    except Exception:
+        return 0
+    if not res:
+        return 0
+    kind, reasons = res
+    if kind == "deny":
+        print("Blocked by dynamia-mysql: %s. Never put passwords in commands (use the secrets file and "
+              "'@@ENV:NAME@@'), and destructive statements are for the user to run, not for the agent."
+              % "; ".join(sorted(set(reasons))), file=sys.stderr)
+        return 2
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "ask",
+        "permissionDecisionReason": "dynamia-mysql: critical operation (%s). Confirm with the user."
+                                    % "; ".join(sorted(set(reasons)))}}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,36 @@
+---
+name: connect
+description: Sets up and tests a connection to a MySQL, Percona Server or MariaDB server with mysql-tool, without ever exposing a password, and detects the flavor and version. Use before any other MySQL work, or when the user asks to connect to a database server, add a server profile or store a database password.
+---
+
+# connect
+
+Supported: MySQL and Percona Server 8.4 and later, MariaDB 10.11 and later. Older servers are reported as unsupported; do not use the replication commands on them.
+
+## Password rules (never break these)
+
+- A password never appears in a command, a profile, a file you write, or your answer. The tool reads it from `~/.config/dynamia-mysql/secrets.env` (mode 600) and gives it to the client through a temporary 0600 option file. A guard hook blocks `-pSECRET`, `--password=`, `MYSQL_PWD=` and any attempt to read the secrets file.
+- You cannot type a secret for the user. Tell them to run it themselves in this prompt:
+  `! python3 ${CLAUDE_PLUGIN_ROOT}/bin/mysql-tool secret-set PROD_DB_PW`
+  For a password you must create (a replication user), they run `secret-gen REPL_PW` and nobody sees it.
+- In SQL, write `'@@ENV:REPL_PW@@'`. The tool substitutes the escaped value at run time.
+
+## Steps
+
+1. Ask for host, port, user and which secret name holds the password (or a `mysql_config_editor` login path on MySQL). Prefer an account with read-only grants for analysis.
+2. Write `~/.config/dynamia-mysql/profiles.toml` (no secret in it; a key containing "pass" is refused):
+
+```toml
+[profiles.prod]
+host = "db1.example.com"
+port = 3306
+user = "dba_ro"
+secret = "PROD_DB_PW"
+ssl_mode = "REQUIRED"      # optional
+# client = "mariadb"       # optional, default: mysql, then mariadb
+```
+
+3. Check it: `python3 ${CLAUDE_PLUGIN_ROOT}/bin/mysql-tool info prod`. Report flavor, version, whether it is supported, `server_id`, binary log and GTID state.
+4. Remote SSL is the default expectation. If `ssl_mode` is missing on a non-local host, say so.
+
+`mysql-tool profiles` and `mysql-tool secrets` list names only, never values. Next: `/dynamia-mysql:inspect`.
