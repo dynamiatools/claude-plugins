@@ -28,7 +28,7 @@ host = "db1.example.com"
 port = 3306
 user = "dba_ro"
 secret = "PROD_DB_PW"
-ssl_mode = "REQUIRED"      # optional
+ssl_mode = "REQUIRED"      # optional. A MariaDB 11.x client insists on TLS: for a server without it (MariaDB 10.x by default) set "DISABLED", only on a trusted network
 # client = "mariadb"       # optional, default: mysql, then mariadb
 ```
 

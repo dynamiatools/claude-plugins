@@ -34,4 +34,6 @@ Install:
 /plugin install dynamia-mysql@dynamia-tools
 ```
 
-Tests: `python3 -m unittest discover -s tests`. They use a fake client, so they need no database. Replica setup is checked against the MySQL 8.4, Percona XtraBackup 8.4, mariabackup and MariaDB documentation; it has not been run against live servers. Failover, backup, diagnose and the audits are checked against a fake client and fake backup tools only, so SQL that depends on a real server (performance_schema, sys, MariaDB views, client options) is unconfirmed.
+Tests: `python3 -m unittest discover -s tests` (fake client, no database needed).
+
+Live-tested on 2026-10-25 against Docker servers (MySQL 8.4.13, Percona Server 8.4.11, MariaDB 11.4.13, MariaDB 10.11, MySQL 8.0.46) with the real clients, XtraBackup 8.4 and mariabackup: connect, inspect, audits, slow queries, locks and deadlocks, schema diff, upgrade check, monitor; building replicas by XtraBackup (MySQL and Percona), mariabackup, CLONE and dump (MySQL and MariaDB); diagnosing a wrong port, errant GTIDs, a missing row and purged binary logs; a MySQL and a MariaDB switchover and a MySQL failover; and the hook and a skill inside a real Claude Code session. Not live-tested: Percona CLONE, MariaDB failover with a dead source, TLS with verified certificates, GTID gaps across several MariaDB domains, replication over a real network.

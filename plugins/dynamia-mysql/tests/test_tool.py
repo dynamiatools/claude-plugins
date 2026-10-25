@@ -23,7 +23,7 @@ class SqlChecksTest(unittest.TestCase):
         ok = ["CREATE USER 'repl'@'10.0.0.2' IDENTIFIED BY '@@ENV:REPL_PW@@'",
               "GRANT REPLICATION SLAVE ON *.* TO 'repl'@'10.0.0.2'",
               "CHANGE REPLICATION SOURCE TO SOURCE_HOST='h', SOURCE_PASSWORD='@@ENV:REPL_PW@@', SOURCE_AUTO_POSITION=1",
-              "START REPLICA; STOP REPLICA", "SET GLOBAL gtid_purged='uuid:1-5'"]
+              "START REPLICA; STOP REPLICA", "SET GLOBAL gtid_purged='3679ff8a-d0bb-11f1-b355-bc241173fbeb:1-5'"]
         for s in ok:
             tool.check_write(s)
 

@@ -356,3 +356,96 @@ class StatusAndMiscTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FreshStatsTest(unittest.TestCase):
+    def test_sizes_are_read_fresh_on_mysql_but_not_on_mariadb(self):
+        h = Home({"VERSION\\(\\)": "v\tc\n8.4.3\tMySQL Community Server\n", "SUM\\(data_length": "b\n10000\n"})
+        try:
+            tool.facts(tool.get_profile("src"))
+            self.assertIn("information_schema_stats_expiry=0", h.calls()[-1]["sql"])
+        finally:
+            h.close()
+        h = Home({"VERSION\\(\\)": "v\tc\n11.4.2-MariaDB\tmariadb.org\n", "SUM\\(data_length": "b\n10000\n"})
+        try:
+            tool.facts(tool.get_profile("src"))
+            self.assertNotIn("information_schema_stats_expiry", h.calls()[-1]["sql"])
+        finally:
+            h.close()
+
+
+class AccountNoiseTest(unittest.TestCase):
+    def test_builtin_accounts_and_mariadb_native_password_are_not_reported(self):
+        rs = [{"User": "mysql.session", "Host": "localhost", "Super_priv": "Y", "Shutdown_priv": "Y"},
+              {"User": "mariadb.sys", "Host": "localhost", "plugin": "mysql_native_password"},
+              {"User": "app", "Host": "localhost", "plugin": "mysql_native_password"}]
+        self.assertEqual(tool.audit_accounts(rs, "mariadb"), [])
+        self.assertEqual(len(tool.audit_accounts(rs, "mysql")), 1)
+
+
+class TlsAndSpaceTest(unittest.TestCase):
+    def maria(self, **kw):
+        return {"version": "11.4.2", "comment": "", "flavor": "mariadb", "ver": (11, 4, 2), "supported": True, "data_bytes": kw.pop("data", 0),
+                "vars": {"server_id": kw.pop("sid", "1"), "log_bin": "ON", **kw}}
+
+    def test_mariadb_without_tls_needs_an_explicit_flag(self):
+        src, rep = self.maria(have_ssl="DISABLED"), self.maria(sid="2")
+        self.assertTrue(any("TLS is not enabled" in x for x in tool.blockers_for(src, rep, "mariabackup")))
+        self.assertEqual(tool.blockers_for(src, rep, "mariabackup", allow_plaintext=True), [])
+        self.assertEqual(tool.blockers_for(self.maria(have_ssl="YES"), rep, "mariabackup"), [])
+
+    def test_runbook_drops_ssl_options_when_tls_is_off(self):
+        src, rep = self.maria(have_ssl="DISABLED"), self.maria(sid="2")
+        off = tool.runbook(src, rep, "mariabackup", "s", "r", tls=False)
+        on = tool.runbook(src, rep, "mariabackup", "s", "r", tls=True)
+        self.assertNotIn("MASTER_SSL", off)
+        self.assertNotIn("REQUIRE SSL", off)
+        self.assertIn("MASTER_SSL=1", on)
+        self.assertIn("REQUIRE SSL", on)
+
+
+class GtidValueTest(unittest.TestCase):
+    def test_positions_must_look_like_gtids(self):
+        for bad in ("SET GLOBAL gtid_slave_pos=''", "SET GLOBAL gtid_slave_pos='abc'", "SET GLOBAL gtid_purged=''",
+                    "SET GLOBAL gtid_purged='nothing'", "SET GLOBAL gtid_slave_pos='0-21-12'; SET GLOBAL gtid_slave_pos=''"):
+            with self.assertRaises(tool.Fail, msg=bad):
+                tool.check_write(bad)
+        for good in ("SET GLOBAL gtid_slave_pos='0-21-12'", "SET GLOBAL gtid_slave_pos='0-21-12,1-5-7'",
+                     "SET GLOBAL gtid_purged='3679ff8a-d0bb-11f1-b355-bc241173fbeb:1-17'",
+                     "SET GLOBAL gtid_purged='+3679ff8a-d0bb-11f1-b355-bc241173fbeb:1-17:20-30'"):
+            tool.check_write(good)
+
+
+class CloneRestartTest(unittest.TestCase):
+    def test_error_3707_is_reported_as_a_finished_clone(self):
+        h = Home()
+        try:
+            os.environ["FAKE_FAIL"] = "ERROR 3707 (HY000): Restart server failed (mysqld is not managed by supervisor process)."
+            msg = tool.start_detached(tool.get_profile("src"), "CLONE INSTANCE FROM 'c'@'h':3306 IDENTIFIED BY '@@ENV:REPL_PW@@'", wait=5)
+            self.assertIn("copied the data", msg)
+        finally:
+            os.environ.pop("FAKE_FAIL", None)
+            h.close()
+
+
+class FailoverDeadSourceTest(unittest.TestCase):
+    def test_a_dead_source_is_not_a_blocker_but_a_broken_sql_thread_is(self):
+        cand = {"vars": {"log_bin": "ON", "log_replica_updates": "ON"}}
+        io_down = {"verdict": "BROKEN", "io": "Connecting", "sql": "Yes", "problems": ["IO thread is Connecting"], "_raw": {}}
+        self.assertEqual(tool.failover_blockers(cand, io_down, source_down=True), [])
+        self.assertEqual(len(tool.failover_blockers(cand, io_down, source_down=False)), 1)
+        sql_down = {"verdict": "BROKEN", "io": "Yes", "sql": "No", "problems": ["SQL thread is No"], "_raw": {"Last_SQL_Error": "boom"}}
+        self.assertEqual(len(tool.failover_blockers(cand, sql_down, source_down=True)), 1)
+
+
+class WritableReplicaTest(unittest.TestCase):
+    def test_a_writable_replica_is_a_warning(self):
+        head = "Source_Host\tReplica_IO_Running\tReplica_SQL_Running\tSeconds_Behind_Source\tAuto_Position"
+        h = Home({"@@max_connections": "v\tc\tmc\tro\n8.4.3\tMySQL\t100\t0\n", "SHOW GLOBAL STATUS": "Variable_name\tValue\nUptime\t10\nThreads_connected\t1\n",
+                  "REPLICA STATUS": head + "\nh\tYes\tYes\t0\t1\n"})
+        try:
+            ok, line = tool.monitor_one("src")
+            self.assertFalse(ok)
+            self.assertIn("writable", line)
+        finally:
+            h.close()
