@@ -5,7 +5,9 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(__file__)
 SERVER = os.path.join(HERE, "..", "bin", "chain-server")
@@ -37,14 +39,84 @@ class PureTest(unittest.TestCase):
         self.assertTrue(cs.allowed({"allow": ["*"]}, rw))
 
     def test_load_config(self):
-        self.assertEqual(cs.load_config("/nonexistent/x.json"), {"servers": {}})
-        bad = os.path.join(HERE, "bad.json")
-        with open(bad, "w") as f:
-            f.write("{nope")
-        try:
+        with isolated_home() as (home, cwd):
+            self.assertEqual(cs.load_config("/nonexistent/x.json"), {"servers": {}, "skipped": []})
+            bad = os.path.join(home, "bad.json")
+            with open(bad, "w") as f:
+                f.write("{nope")
             self.assertRaises(cs.ChainError, cs.load_config, bad)
-        finally:
-            os.remove(bad)
+
+
+def write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f)
+
+
+class isolated_home:
+    """A temp HOME and project dir, so tests never read the real MCP configs."""
+
+    def __enter__(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home, self.cwd = os.path.join(self.tmp.name, "home"), os.path.join(self.tmp.name, "proj")
+        os.makedirs(self.home)
+        os.makedirs(self.cwd)
+        self.patches = [mock.patch.dict(os.environ, {"HOME": self.home}), mock.patch("os.getcwd", return_value=self.cwd)]
+        for p in self.patches:
+            p.start()
+        return self.home, self.cwd
+
+    def __exit__(self, *exc):
+        for p in self.patches:
+            p.stop()
+        self.tmp.cleanup()
+
+
+class ImportTest(unittest.TestCase):
+    def test_claude_code_user_and_project_scope(self):
+        with isolated_home() as (home, cwd):
+            write_json(os.path.join(home, ".claude.json"), {
+                "mcpServers": {"a": {"type": "stdio", "command": "ca", "args": ["x"]}, "b": {"command": "cb"}},
+                "projects": {cwd: {"mcpServers": {"b": {"command": "cb-local"}}}}})
+            servers, skipped = cs.discover(["claude"], home, cwd)
+            self.assertEqual(servers["a"], {"command": "ca", "args": ["x"], "env": {}})
+            self.assertEqual(servers["b"]["command"], "cb-local")
+            self.assertEqual(skipped, [])
+
+    def test_other_formats_and_precedence(self):
+        with isolated_home() as (home, cwd):
+            write_json(os.path.join(home, ".cursor/mcp.json"), {"mcpServers": {"x": {"command": "cursor"}}})
+            write_json(os.path.join(cwd, ".vscode/mcp.json"), {"servers": {"y": {"command": "vscode"}}})
+            write_json(os.path.join(cwd, ".mcp.json"), {"mcpServers": {"x": {"command": "project"}}})
+            write_json(os.path.join(home, ".config/Claude/claude_desktop_config.json"),
+                       {"mcpServers": {"z": {"command": "desktop"}}})
+            servers, _ = cs.discover(cs.SOURCES, home, cwd)
+            self.assertEqual({n: s["command"] for n, s in servers.items()},
+                             {"x": "project", "y": "vscode", "z": "desktop"})
+
+    def test_skips_remote_self_and_excluded_and_expands(self):
+        with isolated_home() as (home, cwd):
+            write_json(os.path.join(cwd, ".mcp.json"), {"mcpServers": {
+                "remote": {"type": "http", "url": "https://x"},
+                "tool-chain": {"command": "python3", "args": ["/p/bin/chain-server"]},
+                "renamed": {"command": "python3", "args": ["/p/bin/chain-server"]},
+                "skipme": {"command": "s"},
+                "ok": {"command": "${CHAIN_T_CMD:-fallback}", "args": ["${CHAIN_T_ARG}"], "env": {"K": "${CHAIN_T_ARG}"}}}})
+            with mock.patch.dict(os.environ, {"CHAIN_T_ARG": "v"}):
+                servers, skipped = cs.discover(["project"], home, cwd, exclude=["skipme"])
+            self.assertEqual(servers, {"ok": {"command": "fallback", "args": ["v"], "env": {"K": "v"}}})
+            self.assertEqual(skipped, ["remote"])
+
+    def test_configured_server_wins_and_import_can_be_off(self):
+        with isolated_home() as (home, cwd):
+            write_json(os.path.join(cwd, ".mcp.json"), {"mcpServers": {"s": {"command": "imported"}}})
+            cfg_path = os.path.join(home, "c.json")
+            write_json(cfg_path, {"servers": {"s": {"command": "mine"}}})
+            self.assertEqual(cs.load_config(cfg_path)["servers"]["s"]["command"], "mine")
+            write_json(cfg_path, {"import": False})
+            self.assertEqual(cs.load_config(cfg_path)["servers"], {})
+            write_json(cfg_path, {"import": ["nope"]})
+            self.assertRaises(cs.ChainError, cs.load_config, cfg_path)
 
 
 class ChainTest(unittest.TestCase):
@@ -65,7 +137,7 @@ class ChainTest(unittest.TestCase):
         self.assertIn("not callable", out)
 
     def test_describe_without_config(self):
-        self.assertIn("No servers configured", cs.Chain({"servers": {}}).describe())
+        self.assertIn("No servers found", cs.Chain({"servers": {}}).describe())
 
     def test_chained_calls_only_print_the_end(self):
         text, err = self.run_code(
@@ -79,6 +151,22 @@ class ChainTest(unittest.TestCase):
         text, err = self.run_code("print(tools['fake']['echo_text'](text='hi'))")
         self.assertFalse(err)
         self.assertTrue(text.startswith("hi"), text)
+
+    def test_only_servers_named_in_the_script_are_started(self):
+        self.chain = cs.Chain({"servers": {
+            "fake": {"command": sys.executable, "args": [FAKE]},
+            "other": {"command": sys.executable, "args": [FAKE]}}})
+        text, err = self.chain.run("print(tools.fake.add(a=1, b=1)['sum'])")
+        self.assertFalse(err)
+        self.assertIsNone(self.chain.upstreams["other"].proc)
+
+    def test_a_broken_server_does_not_hide_the_others(self):
+        self.chain = cs.Chain({"servers": {
+            "fake": {"command": sys.executable, "args": [FAKE]},
+            "broken": {"command": "/nonexistent/server"}}})
+        out = self.chain.describe()
+        self.assertIn("fake.add(", out)
+        self.assertIn("## broken: unavailable", out)
 
     def test_write_tool_is_blocked_by_default(self):
         text, err = self.run_code("tools.fake.delete(id='1')")
