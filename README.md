@@ -18,7 +18,7 @@ claude plugin install <plugin>@dynamia-tools
 
 | Plugin | What it is | Install |
 |---|---|---|
-| [`dynamia`](plugins/dynamia) | Safe, token-cheap work across several repos: batches, worktrees, tests, ship. 19 skills, 4 helper agents, guard hooks, the `ms-workspace` tool and a dev-env panel | `dynamia@dynamia-tools` |
+| [`dynamia`](plugins/dynamia) | Safe, token-cheap work across several repos: batches, worktrees, tests, ship. 20 skills, 4 helper agents, guard hooks, the `ms-workspace` tool and a dev-env panel | `dynamia@dynamia-tools` |
 | [`dynamia-craft`](plugins/dynamia-craft) | Working discipline: ask before building, find the root cause before fixing, plan in small steps, answer clearly. 6 skills, no hooks | `dynamia-craft@dynamia-tools` |
 | [`dynamia-platform`](plugins/dynamia-platform) | Work on [Dynamia Platform](https://dynamia.tools) projects: backend patterns, ZK, Vue frontend, live docs from GitHub and the `dynamia` CLI. 7 skills, 2 light hooks | `dynamia-platform@dynamia-tools` |
 | [`dynamia-ui`](plugins/dynamia-ui) | UI and UX: extract, improve or create a design system; review UX and mobile, SEO, offline, performance; stack advice; a `ds-scan` tool. 8 skills, 1 agent, no hooks | `dynamia-ui@dynamia-tools` |

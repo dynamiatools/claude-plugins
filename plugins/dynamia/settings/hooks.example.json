@@ -170,6 +170,7 @@
     ],
     "ask": [
       "Bash(ms-workspace ship:*)",
+      "Bash(ms-workspace promote:*)",
       "Bash(ms-workspace clean:*)",
       "Bash(ms-workspace env:*)",
       "Bash(ms-workspace open:*)",

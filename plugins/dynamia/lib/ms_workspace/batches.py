@@ -394,7 +394,7 @@ def _ship(ws: Workspace, args: list[str]) -> int:
             die(f"{r}: agent branches not integrated into int/{batch}: {', '.join(pending)}; "
                 f"run 'ms-workspace integrate {batch}' first (or 'clean --force' to discard them)")
         if base in (ws.repo_cfg(r).get("release") or []):
-            die(f"{r}: base '{base}' is a release branch; ship never targets those")
+            die(f"{r}: base '{base}' is a release branch; ship never targets those; use 'ms-workspace promote' to move a base branch to it")
         if push_mode(ws, r, force_pr, force_direct) == "pr" and not shutil.which("gh"):
             die(f"{r}: a pull request needs the GitHub CLI (gh) in PATH; nothing was pushed")
         if not git_ok(ws.repo_dir(r), "fetch", "origin", base, "--quiet"):

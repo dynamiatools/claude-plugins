@@ -52,6 +52,7 @@ Usage:
   ms-workspace modules [deps|rdeps <m>|closure|check]   Maven reactor graph: dependents, exact -pl list for a change, cycles, [[arch.rule]] checks
   ms-workspace recall <words...> [--kind K] [-n N]   full-text search over past sessions, memory notes and the log ("where did we decide X?")
   ms-workspace handoff [--batch B] [--print] | --hook   write the state needed to resume a batch (a hook does it before compaction and at the end)
+  ms-workspace promote [repo] [--to qa|main] [--yes] [--direct]   open a PR from the base branch to a release branch (plan only without --yes)
   ms-workspace release status|notes [repo]   what waits to be promoted from the base branch to qa/main, grouped by commit type, and release notes
   ms-workspace notify <message> [--title T] | --test | --hook   send a notification (ntfy, webhook or local command from [notify]); also a Notification hook
   ms-workspace doctor                        check tools, versions, resources and workspace.toml
@@ -157,7 +158,7 @@ def _dispatch(cmd: str, args: list[str]) -> int:
         "env": batches.cmd_env, "integrate": batches.cmd_integrate, "ship": batches.cmd_ship,
         "clean": batches.cmd_clean, "undo": batches.cmd_undo, "plan": lambda ws, a: batches.cmd_ship(ws, [x for i, x in enumerate(a) if i == 0 or x == "--pr" or (a[0] == "--branch" and i == 1 and not x.startswith("-"))]), "test": runner.cmd_test, "log": overview.cmd_log,
         "status": overview.cmd_status, "claude-md": claude_md.cmd_claude_md,
-        "memory": memory.cmd_memory, "release": lambda ws, a: __import__("ms_workspace.release", fromlist=["x"]).cmd_release(ws, a), "recall": lambda ws, a: __import__("ms_workspace.recall", fromlist=["x"]).cmd_recall(ws, a), "insights": insights.cmd_insights, "tokens": tokens.cmd_tokens,
+        "memory": memory.cmd_memory, "promote": lambda ws, a: __import__("ms_workspace.promote", fromlist=["x"]).cmd_promote(ws, a), "release": lambda ws, a: __import__("ms_workspace.release", fromlist=["x"]).cmd_release(ws, a), "recall": lambda ws, a: __import__("ms_workspace.recall", fromlist=["x"]).cmd_recall(ws, a), "insights": insights.cmd_insights, "tokens": tokens.cmd_tokens,
     }
     if cmd not in table:
         print(f"ERROR: unknown command: {cmd}", file=sys.stderr)

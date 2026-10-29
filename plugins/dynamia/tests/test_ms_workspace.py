@@ -557,12 +557,12 @@ class TestGuard(Base):
     def test_blocks_publishing_commands_inside_a_batch(self):
         d = self.ws.batch("b1")
         for cmd in ("git push origin int/b1", "git -C . push --force", "git push", "gh pr create --fill",
-                    "gh pr merge 3", "ms-workspace ship b1 --yes --skip-gate", "ms-workspace clean b1"):
+                    "gh pr merge 3", "ms-workspace ship b1 --yes --skip-gate", "ms-workspace clean b1", "ms-workspace promote lib --yes"):
             with self.subTest(cmd=cmd):
                 r = self.guard(cmd, d / "lib")
                 self.assertEqual(r.returncode, 2, cmd)
                 self.assertIn("Blocked", r.stderr)
-        self.assertEqual(self.ws.log_lines("--action", "guard").count("blocked"), 7)
+        self.assertEqual(self.ws.log_lines("--action", "guard").count("blocked"), 8)
 
     def test_allows_normal_commands_inside_a_batch(self):
         d = self.ws.batch("b1")
@@ -1824,7 +1824,7 @@ class TestPackaging(unittest.TestCase):
         self.assertEqual(cmds, {"ms-workspace guard", "ms-workspace context", "ms-workspace images capture", "ms-workspace readguard",
                                 "ms-workspace outguard", "ms-workspace readguard --reset", "ms-workspace handoff --hook", "ms-workspace notify --hook"})
         self.assertNotIn("Bash(ms-workspace:*)", data["permissions"]["allow"])
-        self.assertTrue({"Bash(ms-workspace ship:*)", "Bash(ms-workspace clean:*)", "Bash(ms-workspace undo:*)"} <= set(data["permissions"]["ask"]))
+        self.assertTrue({"Bash(ms-workspace ship:*)", "Bash(ms-workspace clean:*)", "Bash(ms-workspace undo:*)", "Bash(ms-workspace promote:*)"} <= set(data["permissions"]["ask"]))
         self.assertEqual(data["statusLine"]["command"], "ms-statusline")
 
     def test_code_stays_valid_for_the_minimum_python(self):
@@ -4570,6 +4570,111 @@ class TestNotify(Base):
         data = json.loads((REPO / "settings" / "hooks.example.json").read_text())
         self.assertEqual(data["hooks"]["Notification"][0]["hooks"][0]["command"], "ms-workspace notify --hook")
         self.assertIn("Bash(ms-workspace notify:*)", data["permissions"]["ask"])
+
+
+# --------------------------------------------------------------------- promote
+class TestPromote(Base):
+    TOML = DEFAULT_TOML.replace('[repos.lib]\nbase = "next"', '[repos.lib]\nbase = "next"\nrelease = ["qa", "main"]')
+
+    def setUp(self):
+        super().setUp()
+        self.ws.set_toml(self.TOML)
+        self.lib = self.ws.root / "lib"
+        for branch in ("qa", "main"):
+            self.ws.git(self.lib, "branch", branch)
+            self.ws.git(self.lib, "push", "-q", "origin", branch)
+        self.ws.commit(self.lib, "feat: add exports", {"e.txt": "1"})
+        self.ws.commit(self.lib, "fix(core)!: drop the old api", {"o.txt": "1"})
+        self.ws.git(self.lib, "push", "-q", "origin", "next")
+
+    def env(self, with_gh=True):
+        bin_dir = self.ws.tmp / "fakebin"
+        bin_dir.mkdir(exist_ok=True)
+        for tool in ("git", "python3", "bash"):
+            link = bin_dir / tool
+            link.unlink(missing_ok=True)
+            link.symlink_to(subprocess.run(["which", tool], capture_output=True, text=True).stdout.strip())
+        if with_gh:
+            gh = bin_dir / "gh"
+            gh.write_text(f'#!/bin/sh\necho "$@" >> "{self.ws.tmp}/gh-calls"\n')
+            gh.chmod(0o755)
+        return {"PATH": str(bin_dir)}
+
+    def remote(self, branch):
+        return self.ws.git(self.ws.tmp / "remote-lib.git", "rev-parse", branch)
+
+    def test_plan_lists_the_commits_and_changes_nothing(self):
+        r = self.ws.ms("promote", "lib", "--to", "main", env=self.env())
+        self.assertOk(r)
+        self.assertIn("promote lib next -> main (PR)", r.stdout)
+        self.assertIn("2 commit(s) waiting", r.stdout)
+        self.assertIn("BREAKING: fix(core)!: drop the old api", r.stdout)
+        self.assertIn("plan only", r.stdout)
+        self.assertFalse((self.ws.tmp / "gh-calls").exists())
+
+    def test_yes_opens_a_pr_from_the_base_branch_and_pushes_nothing(self):
+        before = self.remote("main")
+        r = self.ws.ms("promote", "lib", "--to", "main", "--yes", env=self.env())
+        self.assertOk(r)
+        call = (self.ws.tmp / "gh-calls").read_text()
+        self.assertIn("pr create --base main --head next --title Promote next to main", call)
+        self.assertIn("## Features (1)", call)
+        self.assertEqual(self.remote("main"), before)
+        self.assertIn("ok", self.ws.log_lines("--action", "promote"))
+
+    def test_runs_from_inside_the_repo(self):
+        self.assertOk(self.ws.ms("promote", "--to", "qa", "--yes", cwd=self.lib, env=self.env()))
+        self.assertIn("--base qa", (self.ws.tmp / "gh-calls").read_text())
+
+    def test_several_release_branches_need_to(self):
+        r = self.ws.ms("promote", "lib", "--yes", env=self.env())
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--to", r.stderr)
+        self.assertFalse((self.ws.tmp / "gh-calls").exists())
+
+    def test_destination_must_be_a_release_branch(self):
+        for dest in ("develop", "next"):
+            r = self.ws.ms("promote", "lib", "--to", dest, "--yes", env=self.env())
+            self.assertNotEqual(r.returncode, 0, dest)
+        self.assertIn("not a release branch", r.stderr + self.ws.ms("promote", "lib", "--to", "develop").stderr)
+
+    def test_repo_without_release_branches(self):
+        r = self.ws.ms("promote", "app", "--yes", env=self.env())
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no `release", r.stderr)
+
+    def test_up_to_date_does_nothing(self):
+        self.ws.git(self.lib, "push", "-q", "origin", "next:main")
+        r = self.ws.ms("promote", "lib", "--to", "main", "--yes", env=self.env())
+        self.assertOk(r)
+        self.assertIn("nothing to promote", r.stdout)
+        self.assertFalse((self.ws.tmp / "gh-calls").exists())
+
+    def test_missing_gh_stops_before_anything_is_done(self):
+        r = self.ws.ms("promote", "lib", "--to", "main", "--yes", env=self.env(with_gh=False))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("GitHub CLI", r.stderr)
+
+    def test_unpushed_local_commits_are_called_out(self):
+        self.ws.commit(self.lib, "wip: not pushed", {"w.txt": "1"})
+        self.assertIn("not pushed to origin", self.ws.ms("promote", "lib", "--to", "main", env=self.env()).stdout)
+
+    def test_direct_fast_forwards_the_release_branch(self):
+        r = self.ws.ms("promote", "lib", "--to", "main", "--direct", "--yes", env=self.env())
+        self.assertOk(r)
+        self.assertEqual(self.remote("main"), self.remote("next"))
+        self.assertFalse((self.ws.tmp / "gh-calls").exists())
+
+    def test_direct_refuses_when_the_release_branch_has_its_own_commits(self):
+        self.ws.git(self.lib, "checkout", "-q", "main")
+        self.ws.commit(self.lib, "fix: hotfix on main", {"h.txt": "1"})
+        self.ws.git(self.lib, "push", "-q", "origin", "main")
+        self.ws.git(self.lib, "checkout", "-q", "next")
+        before = self.remote("main")
+        r = self.ws.ms("promote", "lib", "--to", "main", "--direct", "--yes", env=self.env())
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not a fast-forward", r.stderr)
+        self.assertEqual(self.remote("main"), before)
 
 
 if __name__ == "__main__":
