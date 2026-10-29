@@ -10,7 +10,7 @@ AI coding gets expensive and risky when the model does the boring parts: jugglin
 - **Spend tokens on purpose.** Cheap helper agents search and summarize; reports show where the plan went.
 - **Humans publish.** Agents commit locally. You decide what ships.
 
-It has 19 skills, 4 read-only helper agents, guard hooks, a standard-library Python tool (`ms-workspace`) and a status line.
+It has 20 skills, 4 read-only helper agents, guard hooks, a standard-library Python tool (`ms-workspace`) and a status line.
 
 ## Install
 
@@ -34,7 +34,7 @@ once per machine   once per project        per task                             
 2. **Open a batch (per task): `/dynamia:batch`.** Creates one isolated git worktree per repo on a branch `int/<batch>`. For a small, one-repo task on a clean checkout it can recommend a plain branch instead, and it asks you. *Why:* your main checkout stays clean, and several tasks can run side by side.
 3. **Work.** Optionally give each parallel agent its own worktree (`ms-workspace agent new`), so agents never edit the same files. While you work, `/dynamia:test` runs **t0** (only what changed; a pass is remembered, so repeating it is instant) and triages failures. `/dynamia:dev-env` registers the environment variables the tests need.
 4. **Join the agents' work: `/dynamia:integrate`.** Merges the agent branches into `int/<batch>` in dependency order, names conflicting files, then runs **t1** (affected modules plus the ones marked critical). *Why:* conflicts show up locally, before anything is published.
-5. **Ship, only when you ask: `/dynamia:ship`.** Shows the plan (target branch, commits, diffstat), asks, then scans for secrets (`/dynamia:gate`), merges a moved base branch, re-runs t1 and the end-to-end command and pushes or opens a PR. Never force-pushes, never targets a release branch. *Why:* publishing is the one step that stays human. The permission prompt of `ship` is the confirmation.
+5. **Ship, only when you ask: `/dynamia:ship`.** Shows the plan (target branch, commits, diffstat), asks, then scans for secrets (`/dynamia:gate`), merges a moved base branch, re-runs t1 and the end-to-end command and pushes or opens a PR. Never force-pushes, never targets a release branch (that is `/dynamia:promote`). *Why:* publishing is the one step that stays human. The permission prompt of `ship` is the confirmation.
 6. **Afterwards.** `ms-workspace undo <batch>` reverts the last ship with a new commit; `ms-workspace clean` removes finished batches.
 
 Day to day, around the flow: `/dynamia:report` (plan usage, where tokens went, flaky tests), `/dynamia:memory` and `/dynamia:recall` (notes and past sessions), `/dynamia:release` (what waits for qa or main), `/dynamia:open` (a batch in your IDE).
@@ -56,6 +56,7 @@ These read `workspace.toml`. Without one the tool answers `no .dynamia/workspace
 | `/dynamia:memory` | Saves and finds durable notes: decisions, lessons, gotchas, handoffs | The log says what happened; notes say what was learned |
 | `/dynamia:recall` | Full-text search over past sessions, notes and the log | "Where did we decide X?" without re-reading transcripts |
 | `/dynamia:release` | What waits to go from the base branch to qa or main; release notes | Release prep without manual git archaeology |
+| `/dynamia:promote` | Opens a PR from the base branch to qa or main. Only when you ask | The one deliberate way to reach production; `ship` still never touches release branches |
 | `/dynamia:report` | Plan usage and pace, where tokens went, slow or flaky tests | Spend the plan on purpose. Usage works without a workspace; the per-batch history needs one |
 
 ### They work anywhere

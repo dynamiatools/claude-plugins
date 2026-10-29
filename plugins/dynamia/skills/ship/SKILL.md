@@ -41,5 +41,5 @@ It works from the workspace root or from inside the batch worktree. In a batch w
 `ms-workspace clean <batch>` first fetches the base branch from origin and removes the batch without any question only when its work is already there (plain, rebase or squash merge). If the PR is not merged yet it refuses and removes nothing. When the user asks for it, run it and, if it refuses, relay the one-line reason. Discard an unmerged batch only when the user says so (`--force`).
 
 ## Notes
-- Promotion from the base branch to QA/production is a separate, human decision outside this skill.
+- Promotion from the base branch to QA/production is not done here. If the user asks for it, use `/dynamia:promote` (a PR from the base to the release branch).
 - Everything is logged: `ms-workspace log --action ship`.
