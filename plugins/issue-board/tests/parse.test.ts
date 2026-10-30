@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 
-import { ago, issueRefs, repoOf } from '../hooks/parse'
+import { ago, bar, clip, issueRefs, repoOf } from '../hooks/parse'
 
 test('gh issue commands mark an issue as work, close marks it done', () => {
   expect(issueRefs('gh issue view 12 --json title')).toEqual([{ n: 12, kind: 'work' }])
@@ -41,4 +41,11 @@ test('ago is short', () => {
   expect(ago(5 * 60_000)).toBe('5m')
   expect(ago(3 * 3_600_000)).toBe('3h')
   expect(ago(2 * 86_400_000)).toBe('2d')
+})
+
+test('clip ends in an ellipsis and bar fills in proportion', () => {
+  expect(clip('abcdef', 4)).toBe('abc…')
+  expect(clip('abc', 4)).toBe('abc')
+  expect(bar(1, 4, 8)).toBe('▰▰▱▱▱▱▱▱')
+  expect(bar(0, 0, 4)).toBe('▱▱▱▱')
 })

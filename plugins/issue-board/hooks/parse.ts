@@ -43,3 +43,12 @@ export const ago = (ms: number): string => {
   if (min < 60) return `${min}m`
   return min < 1440 ? `${Math.floor(min / 60)}h` : `${Math.floor(min / 1440)}d`
 }
+
+// Cuts text to `max` cells, ending in an ellipsis.
+export const clip = (text: string, max: number): string =>
+  max <= 1 ? '' : text.length <= max ? text : `${text.slice(0, max - 1)}…`
+
+export const bar = (done: number, total: number, width: number): string => {
+  const filled = total === 0 ? 0 : Math.round((done / total) * width)
+  return '▰'.repeat(filled) + '▱'.repeat(width - filled)
+}

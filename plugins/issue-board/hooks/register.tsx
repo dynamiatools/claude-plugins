@@ -2,11 +2,16 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Issue } from '../types'
-import { ago, issueRefs, repoOf } from './parse'
+import { ago, bar, clip, issueRefs, repoOf } from './parse'
 
 const PANE = 'issue-board'
 const KEEP = 20
-const BADGE = { work: ['WORK', 'yellow'], pr: ['PR', 'cyan'], done: ['DONE', 'green'] } as const
+const LOOK = {
+  work: { icon: '●', label: 'IN PROGRESS', color: 'yellow' },
+  pr: { icon: '◐', label: 'PULL REQUEST', color: 'cyan' },
+  done: { icon: '✓', label: 'DONE', color: 'green' },
+} as const
+const FRESH_MS = 30_000
 
 const issues = atom({ plugin: 'issue-board', key: 'issues' } as const, [], { shape: 'issues-1' })
 
@@ -93,25 +98,63 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     const list = await read($, issues)
     const now = await $.clock.now()
-    const room = Math.max(1, (e.viewport?.rows ?? 12) - 3)
-    const shown = [...list].sort((a, b) => b.at - a.at).slice(0, room)
+    const cols = Math.max(30, (e.viewport?.columns ?? 60) - 2)
+    const rows = Math.max(6, e.viewport?.rows ?? 12)
+    const count = { work: 0, pr: 0, done: 0 }
+    for (const i of list) count[i.kind] += 1
+    const head = ` ◆ ISSUES · ${repo || 'no repo'}`.slice(0, cols)
+
+    // Rows left for issues: the header, the bar, one gap and the footer are fixed.
+    let room = rows - 5
+    const groups = (['work', 'pr', 'done'] as const).map(kind => ({
+      kind,
+      items: list.filter(i => i.kind === kind).sort((a, b) => b.at - a.at),
+    }))
 
     return (
       <Box flexDirection="column">
         <Text bold color="black" backgroundColor="magenta">
-          {` ISSUES ${repo} `}
+          {head.padEnd(cols)}
         </Text>
-        {shown.length === 0 && <Text dimColor>No issues yet.</Text>}
-        {shown.map(i => (
-          <Box>
-            <Text bold color="black" backgroundColor={BADGE[i.kind][1]}>
-              {` ${BADGE[i.kind][0]} `}
-            </Text>
-            <Text bold>{` #${i.n} `}</Text>
-            <Text dimColor={i.kind === 'done'}>{(i.title || '').slice(0, 60)}</Text>
-            <Text dimColor>{` ${ago(now - i.at)}`}</Text>
-          </Box>
-        ))}
+        <Box>
+          <Text color="green">{bar(count.done, list.length, 12)}</Text>
+          <Text dimColor>{` ${count.done}/${list.length} done  `}</Text>
+          <Text color="yellow">{`● ${count.work} `}</Text>
+          <Text color="cyan">{`◐ ${count.pr}`}</Text>
+        </Box>
+        {list.length === 0 && <Text dimColor>{'\n  Waiting for the agent to touch an issue…'}</Text>}
+        {groups.map(({ kind, items }) => {
+          if (items.length === 0 || room < 2) return null
+          const look = LOOK[kind]
+          const shown = items.slice(0, Math.max(1, room - 1))
+          room -= shown.length + 1
+
+          return (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color={look.color}>{`${look.label} · ${items.length}`}</Text>
+              {shown.map(i => {
+                const when = ago(now - i.at)
+                const isFresh = now - i.at < FRESH_MS
+                const title = clip(i.title || '(no title)', cols - 6 - String(i.n).length - when.length - 3)
+
+                return (
+                  <Box justifyContent="space-between" width={cols}>
+                    <Box>
+                      <Text color={look.color} bold={isFresh}>{` ${look.icon} `}</Text>
+                      <Text bold color="magenta">{`#${i.n} `}</Text>
+                      <Text bold={isFresh} dimColor={kind === 'done'}>{title}</Text>
+                    </Box>
+                    <Text dimColor>{isFresh ? '✦ now' : when}</Text>
+                  </Box>
+                )
+              })}
+              {items.length > shown.length && <Text dimColor>{`   +${items.length - shown.length} more`}</Text>}
+            </Box>
+          )
+        })}
+        <Box marginTop={1}>
+          <Text dimColor>{' /issues clear · updates live'}</Text>
+        </Box>
       </Box>
     )
   })
