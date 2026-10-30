@@ -1,0 +1,12 @@
+{
+  "name": "bg-output",
+  "version": "0.1.0",
+  "author": {
+    "name": "Mario Serrano"
+  },
+  "description": "A side pane that opens by itself and shows the live output of long-running background commands such as mvn, gradle, java and node.",
+  "license": "MIT",
+  "homepage": "https://github.com/dynamiatools/claude-plugins/tree/master/plugins/bg-output",
+  "repository": "https://github.com/dynamiatools/claude-plugins",
+  "types": "./types/index.d.ts"
+}

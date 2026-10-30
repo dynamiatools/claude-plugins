@@ -63,6 +63,11 @@
       "name": "dynamia-mysql",
       "source": "./plugins/dynamia-mysql",
       "description": "Safe MySQL, Percona Server and MariaDB work: connect without leaking passwords, inspect a database, check replication and build a new replica, with a guard against destructive statements."
+    },
+    {
+      "name": "bg-output",
+      "source": "./plugins/bg-output",
+      "description": "A side pane that opens by itself and shows the live output of long-running background commands such as mvn, gradle, java and node."
     }
   ]
 }
