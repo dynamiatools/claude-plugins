@@ -98,11 +98,10 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     const list = await read($, issues)
     const now = await $.clock.now()
-    const cols = Math.max(30, (e.viewport?.columns ?? 60) - 2)
     const rows = Math.max(6, e.viewport?.rows ?? 12)
     const count = { work: 0, pr: 0, done: 0 }
     for (const i of list) count[i.kind] += 1
-    const head = ` ◆ ISSUES · ${repo || 'no repo'}`.slice(0, cols)
+    const head = ` ◆ ISSUES · ${repo || 'no repo'} `
 
     // Rows left for issues: the header, the bar, one gap and the footer are fixed.
     let room = rows - 5
@@ -113,9 +112,11 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        <Text bold color="black" backgroundColor="magenta">
-          {head.padEnd(cols)}
-        </Text>
+        <Box backgroundColor="magenta">
+          <Text bold color="black" wrap="truncate-end">
+            {head}
+          </Text>
+        </Box>
         <Box>
           <Text color="green">{bar(count.done, list.length, 12)}</Text>
           <Text dimColor>{` ${count.done}/${list.length} done  `}</Text>
@@ -135,16 +136,20 @@ export const register: Register = on => {
               {shown.map(i => {
                 const when = ago(now - i.at)
                 const isFresh = now - i.at < FRESH_MS
-                const title = clip(i.title || '(no title)', cols - 6 - String(i.n).length - when.length - 3)
+                const title = clip(i.title || '(no title)', 120)
 
                 return (
-                  <Box justifyContent="space-between" width={cols}>
-                    <Box>
+                  <Box justifyContent="space-between">
+                    <Box flexShrink={1}>
                       <Text color={look.color} bold={isFresh}>{` ${look.icon} `}</Text>
                       <Text bold color="magenta">{`#${i.n} `}</Text>
-                      <Text bold={isFresh} dimColor={kind === 'done'}>{title}</Text>
+                      <Text bold={isFresh} dimColor={kind === 'done'} wrap="truncate-end">
+                        {title}
+                      </Text>
                     </Box>
-                    <Text dimColor>{isFresh ? '✦ now' : when}</Text>
+                    <Box flexShrink={0}>
+                      <Text dimColor>{isFresh ? ' ✦ now' : ` ${when}`}</Text>
+                    </Box>
                   </Box>
                 )
               })}
