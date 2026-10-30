@@ -1,0 +1,12 @@
+{
+  "name": "issue-board",
+  "version": "0.1.0",
+  "author": {
+    "name": "Mario Serrano"
+  },
+  "description": "A small pane with the GitHub issues the agent is working on, remembered across sessions so a dead session can be resumed.",
+  "license": "MIT",
+  "homepage": "https://github.com/dynamiatools/claude-plugins/tree/master/plugins/issue-board",
+  "repository": "https://github.com/dynamiatools/claude-plugins",
+  "types": "./types/index.d.ts"
+}

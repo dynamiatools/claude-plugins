@@ -31,6 +31,7 @@ claude plugin install <plugin>@dynamia-tools
 | [`dynamia-remix`](plugins/dynamia-remix) | Remix an app you admire into your own product, clean-room: map it, plan and rebuild it, score parity, read what its users hate, rebrand and sweep. 6 skills, 3 tools, no hooks | `dynamia-remix@dynamia-tools` |
 | [`dynamia-mysql`](plugins/dynamia-mysql) | MySQL, Percona and MariaDB (8.4+ / 10.11+): connect without leaking passwords, inspect, check replication, build a new replica, with a guard against destructive operations. 13 skills (connect, inspect, replicas, backup, failover, audit, performance, upgrade), 1 guard hook, a `mysql-tool` | `dynamia-mysql@dynamia-tools` |
 | [`bg-output`](plugins/bg-output) | A side pane that opens by itself with the live output of long background commands (mvn, gradle, java, node). A mod: no skills, 1 hooks module | `bg-output@dynamia-tools` |
+| [`issue-board`](plugins/issue-board) | A small pane with the GitHub issues the agent is working on, kept across sessions to resume after a crash. A mod: no skills, 1 hooks module | `issue-board@dynamia-tools` |
 
 Each works on its own; they only point to each other as optional extras, and recommend installing the sibling when it is missing. Together they cover the workflow (`dynamia`), the way of working (`dynamia-craft`), the framework (`dynamia-platform`) and the interface (`dynamia-ui`).
 
