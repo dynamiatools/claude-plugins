@@ -3,6 +3,7 @@
   "owner": {
     "name": "Dynamia Soluciones"
   },
+  "description": "Plugins we use every day at Dynamia to work with Claude Code: multi-repo workflow, working discipline, Java, Kotlin, testing, docs, UI, MySQL, MCP tools and more.",
   "plugins": [
     {
       "name": "dynamia",
