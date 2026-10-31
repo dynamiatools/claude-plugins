@@ -1,0 +1,10 @@
+#!/bin/sh
+# A fake gh: answers the few calls gh-lite makes, from fixed data.
+case "$*" in
+  "issue view 7 "*) echo '{"number":7,"state":"CLOSED","title":"Seven","labels":[{"name":"bug"}],"url":"u7"}' ;;
+  "issue view 9 "*) echo "no such issue" >&2; exit 1 ;;
+  "pr view 3 --json number,title"*) echo '{"number":3,"title":"PR","state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","reviewDecision":null,"headRefName":"h","baseRefName":"master","url":"u","statusCheckRollup":[{"name":"build","status":"COMPLETED","conclusion":"SUCCESS"},{"name":"lint","status":"COMPLETED","conclusion":"FAILURE"},{"name":"e2e","status":"IN_PROGRESS","conclusion":""}],"closingIssuesReferences":[{"number":7}]}' ;;
+  "pr view 3 --json statusCheckRollup") echo '{"statusCheckRollup":[{"name":"lint","status":"COMPLETED","conclusion":"FAILURE"},{"context":"ci","state":"SUCCESS"}]}' ;;
+  "pr view 3 --json closingIssuesReferences,state") echo '{"state":"MERGED","closingIssuesReferences":[{"number":7}]}' ;;
+  *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
