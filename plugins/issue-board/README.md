@@ -13,7 +13,8 @@ It is a mod (a hooks module), not a skill: it changes the interface and adds no 
 - The title comes from `gh issue view N --json title`. Without `gh`, or without access, the pane shows the `#N` alone.
 - The pane opens by itself on the first issue. It shows a colored title with the repo, and one entry per issue: badge, number, title and time since the last activity (newest first). Long titles wrap under themselves, up to three rows.
 - The list is stored per repository (`$.store`, kept between sessions). When a new session starts in the same repo, the issues still open are added to the system prompt, so the agent offers to continue them and checks each one on GitHub first.
-- `/issues` shows the list and opens the pane; `/issues clear` empties it.
+- The agent can update the board itself with the `issue` tool (`mcp__issue-board__issue`): a state per issue (`work`, `pr`, `done`, or `drop` to remove it) and `sync: true` to check every open issue on GitHub and mark the closed ones done. The board also syncs by itself after `gh pr merge`.
+- `/issues` shows the list and opens the pane; `/issues sync` marks the issues closed on GitHub as done; `/issues clear` empties it.
 
 ## Works with `dynamia`, but does not need it
 The plugin keeps and resumes its own state. If the `dynamia` plugin is installed (its skills are listed as `/dynamia:<skill>`), the resume note suggests `/dynamia:memory` for a longer handoff; otherwise suggest `/plugin install dynamia@dynamia-tools`. Nothing breaks without it.
@@ -24,7 +25,7 @@ The plugin keeps and resumes its own state. If the `dynamia` plugin is installed
 ```
 
 ## Limits
-- Detection is by the shell command text: an issue worked on without any of the commands above does not appear.
+- Detection is by the shell command text: an issue worked on without any of the commands above does not appear until the agent (or `/issues sync`) updates it. A PR merged from the web closes its issue unseen until the next sync.
 - The repository is taken from `git remote get-url origin`; only GitHub remotes are tracked.
 - The pane needs a wide terminal; below that it waits undrawn.
 
