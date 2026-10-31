@@ -12,6 +12,12 @@ Five small MCP servers that answer in one call what the agent would otherwise as
 
 Only `test_runner.run`, `board.set` and `board.clear` are not marked read-only, so a chain needs them in `allow`.
 
+## Install
+```
+/plugin install dynamia-mcp@dynamia-tools
+```
+In one step on Claude Code 2.1.275 or later: `/plugin install dynamia-mcp --marketplace dynamiatools/claude-plugins`.
+
 ## Use them
 Add the servers you want to `mcp-tool-chain`'s `servers` (use the real path of the installed plugin), or to a `.mcp.json`:
 ```json
