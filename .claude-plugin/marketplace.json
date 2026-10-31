@@ -76,6 +76,11 @@
       "description": "A small pane with the GitHub issues the agent is working on, remembered across sessions so a dead session can be resumed."
     },
     {
+      "name": "file-outline",
+      "source": "./plugins/file-outline",
+      "description": "A side pane with the outline of the text file the agent last read or edited: headings, classes, functions, sections. A mod."
+    },
+    {
       "name": "hover-preview",
       "source": "./plugins/hover-preview",
       "description": "Hover a pasted [Image #N] or a file path in Claude's replies to preview it in the terminal; click to open it. A mod."
