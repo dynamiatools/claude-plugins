@@ -43,8 +43,7 @@ class Server:
 
 
 def value(r: dict):
-    s = r["structuredContent"]
-    return s["result"] if list(s) == ["result"] else s
+    return r["structuredContent"] if "structuredContent" in r else json.loads(r["content"][0]["text"])
 
 
 def git(repo: str, *argv: str):
@@ -217,6 +216,13 @@ class Board(Base):
         self.assertEqual(value(again.call("list", state="work")), [])
         self.assertEqual(value(again.call("clear")), {"cleared": True})
         self.assertEqual(value(again.call("list")), [])
+
+    def test_a_list_result_is_text_json_only_so_a_chain_gets_the_list_itself(self):
+        s = self.serve("board.py", **self.env)
+        r = s.call("list")
+        self.assertNotIn("structuredContent", r)
+        self.assertEqual(json.loads(r["content"][0]["text"]), [])
+        self.assertIn("structuredContent", s.call("clear"))
 
     def test_bad_updates_and_a_missing_remote_are_errors(self):
         s = self.serve("board.py", **self.env)
