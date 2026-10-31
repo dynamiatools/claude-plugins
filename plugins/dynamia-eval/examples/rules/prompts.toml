@@ -1,0 +1,49 @@
+# Example rules for checking a prompt or a message. Copy what you need to .dynamia-eval/rules/.
+
+[[rule]]
+id = "no-aws-key"
+type = "noul"
+severity = "block"
+source = "example"
+check = { regex = "AKIA[0-9A-Z]{16}", expect = "absent" }
+example = [
+  { state = "deploy with key AKIAABCDEFGHIJKLMNOP", expect = "fail" },
+  { state = "deploy with the key stored in the vault", expect = "pass" },
+]
+
+[[rule]]
+id = "short-enough"
+type = "noul"
+severity = "warn"
+source = "example"
+check = { max_chars = 2000 }
+
+[[rule]]
+id = "states-a-goal"
+type = "noul"
+severity = "block"
+instructions = "Does the text say what outcome the author wants, not only a topic?"
+criteria = "True when a concrete result is requested (fix, create, explain X). False for a bare topic or greeting."
+pass = { min = 0.6 }
+example = [
+  { state = "Fix the login redirect so it keeps the return URL.", expect = "pass" },
+  { state = "login", expect = "fail" },
+]
+
+[[rule]]
+id = "request-kind"
+type = "choice"
+severity = "warn"
+instructions = "What is the main kind of request?"
+criteria = "bug: something broken. feature: new behavior. question: asks for information."
+options = ["bug", "feature", "question"]
+pass = { accept = ["bug", "feature"], min_confidence = 0.6 }
+
+[[rule]]
+id = "clarity"
+type = "score"
+severity = "warn"
+instructions = "How clear is the request for someone who has not seen the conversation?"
+criteria = "1 needs guessing. 2 mostly clear with gaps. 3 can be done as written."
+levels = ["unclear", "gaps", "clear"]
+pass = { min = 2 }

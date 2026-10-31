@@ -1,0 +1,11 @@
+{
+  "name": "dynamia-eval",
+  "version": "0.1.0",
+  "author": {
+    "name": "Mario Serrano"
+  },
+  "description": "Local rule evaluation for Claude Code: write rules once, check any text or prompt against them with fast deterministic checks and a judge for the rest, and draft the rules from a conversation.",
+  "license": "MIT",
+  "homepage": "https://github.com/dynamiatools/claude-plugins/tree/master/plugins/dynamia-eval",
+  "repository": "https://github.com/dynamiatools/claude-plugins"
+}
