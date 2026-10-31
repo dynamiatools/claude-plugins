@@ -79,6 +79,11 @@
       "name": "dynamia-mcp",
       "source": "./plugins/dynamia-mcp",
       "description": "Small stdio MCP servers that save the agent work: GitHub issue and PR state, a code map, a test runner that returns only failures, git overview and an issue board. Built to chain with mcp-tool-chain."
+    },
+    {
+      "name": "dynamia-eval",
+      "source": "./plugins/dynamia-eval",
+      "description": "Local rule evaluation: keep rules in the project, check any text against them with fast deterministic checks plus one judging pass, and draft the rules from a conversation."
     }
   ]
 }

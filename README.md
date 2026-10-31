@@ -33,6 +33,7 @@ claude plugin install <plugin>@dynamia-tools
 | [`bg-output`](plugins/bg-output) | A side pane that opens by itself with the live output of long background commands (mvn, gradle, java, node). A mod: no skills, 1 hooks module | `bg-output@dynamia-tools` |
 | [`issue-board`](plugins/issue-board) | A small pane with the GitHub issues the agent is working on, kept across sessions to resume after a crash. A mod: no skills, 1 hooks module | `issue-board@dynamia-tools` |
 | [`dynamia-mcp`](plugins/dynamia-mcp) | Five small stdio MCP servers (GitHub issue and PR state, code map, test runner that returns only failures, git overview, issue board) built to chain with `mcp-tool-chain`. No skills, no hooks | `dynamia-mcp@dynamia-tools` |
+| [`dynamia-eval`](plugins/dynamia-eval) | Check any text against rules kept in the project: fast deterministic checks plus one judging pass, and rules drafted from a conversation. 3 skills, a Python script, no hooks | `dynamia-eval@dynamia-tools` |
 
 Each works on its own; they only point to each other as optional extras, and recommend installing the sibling when it is missing. Together they cover the workflow (`dynamia`), the way of working (`dynamia-craft`), the framework (`dynamia-platform`) and the interface (`dynamia-ui`).
 
