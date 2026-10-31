@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
 import type { Job } from '../types'
-import { isWatched } from './watch'
+import { isDetached, isWatched, logFileOf } from './watch'
 
 const PANE = 'bg-output'
 const KEEP = 8
@@ -32,14 +32,20 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    // The shell's folder before the command runs: a relative log path is taken from it.
+    const cwd = await $.session.cwd()
     const ran = await next(e)
     if (!('result' in ran) || ran.result === undefined) return ran
     const result = ran.result as { backgroundTaskId?: string; backgroundOutputPath?: string }
-    const id = result.backgroundTaskId
-    if (id === undefined || !isWatched(e.command)) return ran
 
-    const file = result.backgroundOutputPath ?? ran.text?.match(/(\/\S+\.output)/)?.[1]
-    if (file === undefined) return ran
+    // A command with nohup is no background task of Claude Code: follow the log it writes.
+    let id = result.backgroundTaskId
+    let file = result.backgroundOutputPath ?? ran.text?.match(/(\/\S+\.output)/)?.[1]
+    if (id === undefined && isDetached(e.command)) {
+      file = logFileOf(e.command, cwd) ?? undefined
+      id = file && `nohup:${file}`
+    } else if (!isWatched(e.command)) return ran
+    if (id === undefined || file === undefined) return ran
 
     const now = await $.clock.now()
     const job: Job = { id, command: e.command, file, tail: '', changedAt: now, startedAt: now }
