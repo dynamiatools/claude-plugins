@@ -1,0 +1,11 @@
+{
+  "name": "dynamia-mcp",
+  "version": "0.1.0",
+  "author": {
+    "name": "Mario Serrano"
+  },
+  "description": "Small stdio MCP servers that save the agent work: GitHub issue and PR state, a code map, a test runner that returns only failures, git overview and an issue board. Built to chain with mcp-tool-chain.",
+  "license": "MIT",
+  "homepage": "https://github.com/dynamiatools/claude-plugins/tree/master/plugins/dynamia-mcp",
+  "repository": "https://github.com/dynamiatools/claude-plugins"
+}
