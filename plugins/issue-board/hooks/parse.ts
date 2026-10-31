@@ -48,6 +48,10 @@ export const ago = (ms: number): string => {
 export const clip = (text: string, max: number): string =>
   max <= 1 ? '' : text.length <= max ? text : `${text.slice(0, max - 1)}…`
 
+// Rows a text takes when wrapped at `width` cells; words can waste a little of each row, so it is rounded up.
+export const rowsOf = (text: string, width: number): number =>
+  width <= 2 ? 1 : Math.max(1, Math.ceil(text.length / (width - 2)))
+
 export const bar = (done: number, total: number, width: number): string => {
   const filled = total === 0 ? 0 : Math.round((done / total) * width)
   return '▰'.repeat(filled) + '▱'.repeat(width - filled)

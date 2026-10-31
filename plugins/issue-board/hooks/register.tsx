@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Issue } from '../types'
-import { ago, bar, clip, issueRefs, repoOf } from './parse'
+import { ago, bar, clip, issueRefs, repoOf, rowsOf } from './parse'
 
 const PANE = 'issue-board'
 const KEEP = 20
@@ -12,6 +12,7 @@ const LOOK = {
   done: { icon: '✓', label: 'DONE', color: 'green' },
 } as const
 const FRESH_MS = 30_000
+const MAX_TITLE_ROWS = 3
 
 const issues = atom({ plugin: 'issue-board', key: 'issues' } as const, [], { shape: 'issues-1' })
 
@@ -99,6 +100,13 @@ export const register: Register = on => {
     const list = await read($, issues)
     const now = await $.clock.now()
     const rows = Math.max(6, e.viewport?.rows ?? 12)
+    const cols = e.viewport?.columns ?? 100
+    // A title wraps under itself, in the width left after the icon, "#N" and the time column.
+    const titleOf = (i: Issue) => {
+      const width = cols - String(i.n).length - 13
+
+      return { text: clip(i.title || '(no title)', width * MAX_TITLE_ROWS - 3), width }
+    }
     const count = { work: 0, pr: 0, done: 0 }
     for (const i of list) count[i.kind] += 1
     const head = ` ◆ ISSUES · ${repo || 'no repo'} `
@@ -127,8 +135,16 @@ export const register: Register = on => {
         {groups.map(({ kind, items }) => {
           if (items.length === 0 || room < 2) return null
           const look = LOOK[kind]
-          const shown = items.slice(0, Math.max(1, room - 1))
-          room -= shown.length + 1
+          const shown: Issue[] = []
+          let used = 1
+          for (const i of items) {
+            const { text, width } = titleOf(i)
+            const need = rowsOf(text, width)
+            if (shown.length > 0 && used + need > room) break
+            shown.push(i)
+            used += need
+          }
+          room -= used
 
           return (
             <Box flexDirection="column" marginTop={1}>
@@ -136,18 +152,20 @@ export const register: Register = on => {
               {shown.map(i => {
                 const when = ago(now - i.at)
                 const isFresh = now - i.at < FRESH_MS
-                const title = clip(i.title || '(no title)', 120)
+                const { text } = titleOf(i)
 
                 return (
-                  <Box justifyContent="space-between">
-                    <Box flexShrink={1}>
+                  <Box>
+                    <Box flexShrink={0}>
                       <Text color={look.color} bold={isFresh}>{` ${look.icon} `}</Text>
-                      <Text bold color="magenta">{`#${i.n} `}</Text>
-                      <Text bold={isFresh} dimColor={kind === 'done'} wrap="truncate-end">
-                        {title}
+                      <Text bold color="magenta">{`#${i.n}`}</Text>
+                    </Box>
+                    <Box flexGrow={1} flexShrink={1} marginLeft={1}>
+                      <Text bold={isFresh} dimColor={kind === 'done'} wrap="wrap">
+                        {text}
                       </Text>
                     </Box>
-                    <Box flexShrink={0}>
+                    <Box flexShrink={0} marginLeft={1}>
                       <Text dimColor>{isFresh ? ' ✦ now' : ` ${when}`}</Text>
                     </Box>
                   </Box>

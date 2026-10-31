@@ -11,7 +11,7 @@ It is a mod (a hooks module), not a skill: it changes the interface and adds no 
   - `git switch -c fix/123-title` (or `checkout -b`, `branch`) with a number at the start of the name marks `#123` as `WORK` and remembers the branch.
   - `git commit` with `#N` in the command marks it `WORK`.
 - The title comes from `gh issue view N --json title`. Without `gh`, or without access, the pane shows the `#N` alone.
-- The pane opens by itself on the first issue. It shows a colored title with the repo, and one row per issue: badge, number, title and time since the last activity (newest first). It needs about 110 columns or more.
+- The pane opens by itself on the first issue. It shows a colored title with the repo, and one entry per issue: badge, number, title and time since the last activity (newest first). Long titles wrap under themselves, up to three rows.
 - The list is stored per repository (`$.store`, kept between sessions). When a new session starts in the same repo, the issues still open are added to the system prompt, so the agent offers to continue them and checks each one on GitHub first.
 - `/issues` shows the list and opens the pane; `/issues clear` empties it.
 

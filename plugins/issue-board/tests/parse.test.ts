@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 
-import { ago, bar, clip, issueRefs, repoOf } from '../hooks/parse'
+import { ago, bar, clip, issueRefs, repoOf, rowsOf } from '../hooks/parse'
 
 test('gh issue commands mark an issue as work, close marks it done', () => {
   expect(issueRefs('gh issue view 12 --json title')).toEqual([{ n: 12, kind: 'work' }])
@@ -48,4 +48,10 @@ test('clip ends in an ellipsis and bar fills in proportion', () => {
   expect(clip('abc', 4)).toBe('abc')
   expect(bar(1, 4, 8)).toBe('▰▰▱▱▱▱▱▱')
   expect(bar(0, 0, 4)).toBe('▱▱▱▱')
+})
+
+test('rowsOf counts the wrapped rows of a title', () => {
+  expect(rowsOf('short', 40)).toBe(1)
+  expect(rowsOf('x'.repeat(100), 42)).toBe(3)
+  expect(rowsOf('', 40)).toBe(1)
 })
