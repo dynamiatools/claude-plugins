@@ -1,0 +1,12 @@
+{
+  "name": "hover-preview",
+  "version": "0.1.0",
+  "author": {
+    "name": "Mario Serrano"
+  },
+  "description": "Hover a pasted [Image #N] or a file path in Claude's replies to preview it in the terminal; click to open it.",
+  "license": "MIT",
+  "homepage": "https://github.com/dynamiatools/claude-plugins/tree/master/plugins/hover-preview",
+  "repository": "https://github.com/dynamiatools/claude-plugins",
+  "types": "./types/index.d.ts"
+}
