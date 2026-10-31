@@ -81,6 +81,11 @@
       "description": "A side pane with the outline of the text file the agent last read or edited: headings, classes, functions, sections. A mod."
     },
     {
+      "name": "hover-preview",
+      "source": "./plugins/hover-preview",
+      "description": "Hover a pasted [Image #N] or a file path in Claude's replies to preview it in the terminal; click to open it. A mod."
+    },
+    {
       "name": "dynamia-mcp",
       "source": "./plugins/dynamia-mcp",
       "description": "Small stdio MCP servers that save the agent work: GitHub issue and PR state, a code map, a test runner that returns only failures, git overview and an issue board. Built to chain with mcp-tool-chain."
