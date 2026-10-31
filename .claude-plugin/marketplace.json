@@ -76,6 +76,11 @@
       "description": "A small pane with the GitHub issues the agent is working on, remembered across sessions so a dead session can be resumed."
     },
     {
+      "name": "file-outline",
+      "source": "./plugins/file-outline",
+      "description": "A side pane with the outline of the text file the agent last read or edited: headings, classes, functions, sections. A mod."
+    },
+    {
       "name": "dynamia-mcp",
       "source": "./plugins/dynamia-mcp",
       "description": "Small stdio MCP servers that save the agent work: GitHub issue and PR state, a code map, a test runner that returns only failures, git overview and an issue board. Built to chain with mcp-tool-chain."

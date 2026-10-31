@@ -1,0 +1,12 @@
+{
+  "name": "file-outline",
+  "version": "0.1.0",
+  "author": {
+    "name": "Mario Serrano"
+  },
+  "description": "A side pane with the outline of the text file the agent last read or edited: headings, classes, functions, sections.",
+  "license": "MIT",
+  "homepage": "https://github.com/dynamiatools/claude-plugins/tree/master/plugins/file-outline",
+  "repository": "https://github.com/dynamiatools/claude-plugins",
+  "types": "./types/index.d.ts"
+}
