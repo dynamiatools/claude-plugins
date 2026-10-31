@@ -23,6 +23,54 @@ async function save($: EngineInterface, repo: string, list: Issue[]) {
   if (repo !== '') await $.store.set(`issues:${repo}`, list)
 }
 
+const TOOL = 'mcp__issue-board__issue'
+const STATES = ['work', 'pr', 'done', 'drop'] as const
+type Change = { n: number; state: (typeof STATES)[number]; title?: string }
+
+const ghTitle = ($: EngineInterface, n: number) =>
+  $.process
+    .run(['gh', 'issue', 'view', String(n), '--json', 'title', '-q', '.title'], { timeoutMs: 10_000 })
+    .then(r => (r.exitCode === 0 ? r.stdout.trim() : ''))
+    .catch(() => '')
+
+// Applies what the agent says: a state per issue, `drop` removes it. Returns one line per change.
+async function apply($: EngineInterface, changes: Change[]) {
+  const now = await $.clock.now()
+  const out: string[] = []
+  for (const c of changes) {
+    const known = (await read($, issues)).find(i => i.n === c.n)
+    if (c.state === 'drop') {
+      await update($, issues, list => list.filter(i => i.n !== c.n))
+      out.push(`#${c.n} removed`)
+      continue
+    }
+    const title = c.title || known?.title || (await ghTitle($, c.n))
+    await update($, issues, list => {
+      const one: Issue = { n: c.n, kind: c.state, title, branch: known?.branch ?? '', at: now }
+
+      return [...list.filter(i => i.n !== c.n), one].slice(-KEEP)
+    })
+    out.push(`#${c.n} ${c.state}`)
+  }
+
+  return out
+}
+
+// Asks GitHub about every issue not done and marks the closed ones done: a merged PR closes its issue
+// without any command the board could see.
+async function sync($: EngineInterface) {
+  const closed: Change[] = []
+  for (const i of (await read($, issues)).filter(i => i.kind !== 'done')) {
+    const state = await $.process
+      .run(['gh', 'issue', 'view', String(i.n), '--json', 'state', '-q', '.state'], { timeoutMs: 10_000 })
+      .then(r => (r.exitCode === 0 ? r.stdout.trim() : ''))
+      .catch(() => '')
+    if (state === 'CLOSED') closed.push({ n: i.n, state: 'done' })
+  }
+
+  return apply($, closed)
+}
+
 export const register: Register = on => {
   let repo = ''
   let resume = ''
@@ -34,7 +82,33 @@ export const register: Register = on => {
     const open = stored.filter(i => i.kind !== 'done')
     resume = open.length === 0 ? '' : `Issues in progress in ${repo} when the last session ended:\n${open.map(line).join('\n')}`
     await update($, issues, () => stored)
-    await $.command.register({ name: 'issues', description: 'Show the issues in progress; "/issues clear" empties the list' })
+    await $.command.register({ name: 'issues', description: 'Show the issues in progress; "/issues sync" checks them on GitHub, "/issues clear" empties the list' })
+    await $.tool.register({
+      name: 'issue',
+      isDeferred: false,
+      description:
+        'Updates the issue board shown to the user. Call it whenever an issue changes state and the board may not have noticed: ' +
+        'a PR merged or closed it, you started one, or one is no longer relevant. ' +
+        'Pass `updates` with a state per issue (work, pr, done, or drop to remove it), and/or `sync: true` to check every open issue on GitHub and mark the closed ones done.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          updates: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                n: { type: 'number', description: 'Issue number' },
+                state: { type: 'string', enum: [...STATES] },
+                title: { type: 'string', description: 'Optional; read from GitHub when left out' },
+              },
+              required: ['n', 'state'],
+            },
+          },
+          sync: { type: 'boolean', description: 'Check open issues on GitHub and mark the closed ones done' },
+        },
+      },
+    })
     if (open.length > 0) void $.ui.open({ id: PANE, title: 'Issues' })
 
     return next(e)
@@ -62,14 +136,35 @@ export const register: Register = on => {
       await save($, repo, [])
       return { text: 'Issue list cleared.' }
     }
+    if (e.args.trim() === 'sync') {
+      const done = await sync($)
+      await save($, repo, await read($, issues))
+
+      return { text: done.length === 0 ? 'Nothing closed on GitHub.' : `Marked done: ${done.join(', ')}` }
+    }
     const list = await read($, issues)
     void $.ui.open({ id: PANE, title: 'Issues' })
 
     return { text: list.length === 0 ? 'No issues tracked yet.' : list.map(line).join('\n') }
   })
 
+  on('tool.call', { tool: TOOL }, async ($, e) => {
+    const input = e as unknown as { updates?: Change[]; sync?: boolean }
+    const changes = (input.updates ?? []).filter(c => Number.isInteger(c.n) && STATES.includes(c.state))
+    const done = [...(await apply($, changes)), ...(input.sync ? await sync($) : [])]
+    await save($, repo, await read($, issues))
+    void $.ui.open({ id: PANE, title: 'Issues' })
+
+    return { result: done.length === 0 ? 'Board unchanged.' : `Board updated: ${done.join(', ')}` }
+  })
+
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
+    // A merged PR closes its issues with no command the board can read: ask GitHub.
+    if (/\bgh\s+pr\s+merge\b/.test(e.command)) {
+      await sync($)
+      await save($, repo, await read($, issues))
+    }
     const refs = issueRefs(e.command)
     if (refs.length === 0) return ran
 
@@ -78,10 +173,7 @@ export const register: Register = on => {
     for (const ref of refs) {
       const title =
         known.find(i => i.n === ref.n)?.title ||
-        (await $.process
-          .run(['gh', 'issue', 'view', String(ref.n), '--json', 'title', '-q', '.title'], { timeoutMs: 10_000 })
-          .then(r => (r.exitCode === 0 ? r.stdout.trim() : ''))
-          .catch(() => ''))
+        (await ghTitle($, ref.n))
       await update($, issues, list => {
         const old = list.find(i => i.n === ref.n)
         const one: Issue = { n: ref.n, kind: ref.kind, title, branch: ref.branch ?? old?.branch ?? '', at: now }
