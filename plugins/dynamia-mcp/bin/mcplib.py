@@ -55,9 +55,12 @@ def call(tools: dict[str, Tool], name: str, args: dict) -> dict:
         value = tool.fn(args)
     except ToolFail as e:
         return {"content": [{"type": "text", "text": str(e)}], "isError": True}
-    # structuredContent must be an object; wrap lists and scalars.
-    structured = value if isinstance(value, dict) else {"result": value}
-    return {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}], "structuredContent": structured}
+    out = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}]}
+    # structuredContent must be an object; a list or scalar goes as text only, which clients parse as JSON.
+    if isinstance(value, dict):
+        out["structuredContent"] = value
+
+    return out
 
 
 def serve(server_name: str, tools: dict[str, Tool]) -> None:
