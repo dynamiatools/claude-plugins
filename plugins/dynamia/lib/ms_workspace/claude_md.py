@@ -43,7 +43,7 @@ def render(ws: Workspace) -> str:
                    + (f", depends on {', '.join(deps)}" if deps else ""))
     out += ["", "## Rules for agents",
             "- Work only inside the repo/module assigned to your task, inside a batch worktree (`working-trees/<batch>/...`, or `.batches/<batch>/...` in an older layout).",
-            "- Commit locally. Never `git push`, `gh pr create|merge` or `ms-workspace clean|undo` by hand: a hook blocks them. "
+            "- Commit locally. Never `git push`, `gh pr create|merge` or `ms-workspace clean --force|undo` by hand: a hook blocks them. "
             "Publishing goes through `/dynamia:ship` (plan, confirmation, `ms-workspace ship`), and only when the user asks: "
             "\"open a PR\" means `ship --pr`; \"ship\" or \"publish\" uses each repo's configured push mode. If the plan says RECOMMEND A PR, tell the user and let them choose.",
             "- Missing dependencies: run `ms-workspace env <batch> --setup` (the repo's own `setup` command; Claude Code asks the user to approve it). If the repo has none, use its normal install command (npm/pnpm/mvn/gradle) in the worktree. Only `env --trust` is left to the user.",

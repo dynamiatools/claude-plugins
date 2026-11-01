@@ -19,7 +19,7 @@ GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec
 PUBLISH_GH = {("pr", "create"), ("pr", "merge"), ("pr", "ready"), ("pr", "close"), ("release", "create"),
               ("repo", "create"), ("repo", "delete"), ("workflow", "run")}
 LOOSE = re.compile(r"\bpush\b|\bgh\s+(pr|release|repo|api|workflow)\b|\bms-workspace\s+(clean|env|setup-hooks|undo|ps|docker)\b|\bsend-pack\b")
-MESSAGE = ("Blocked: agents in a batch worktree must not push, open or merge PRs by hand, or run 'ms-workspace clean|undo|promote|setup-hooks|env --trust' "
+MESSAGE = ("Blocked: agents in a batch worktree must not push, open or merge PRs by hand, or run 'ms-workspace clean --force|undo|promote|setup-hooks|env --trust' "
            "or 'ship --skip-gate'. Commit locally. When the user asks to publish or open a PR, use the /dynamia:ship skill: "
            "'ms-workspace ship <batch> [--pr] --yes' after showing the plan and getting their confirmation.")
 
@@ -102,9 +102,9 @@ def analyze(command: str, depth: int = 0) -> str | None:
         elif prog == "ms-workspace":
             sub = next((a for a in args if not a.startswith("-")), "")
             words = [a for a in args if not a.startswith("-")]
-            if (sub in ("clean", "setup-hooks", "undo", "promote") or (sub == "ship" and "--skip-gate" in args) or (sub == "env" and "--trust" in args)
+            if ((sub == "clean" and "--force" in args) or sub in ("setup-hooks", "undo", "promote") or (sub == "ship" and "--skip-gate" in args) or (sub == "env" and "--trust" in args)
                     or (sub == "ps" and words[1:2] == ["kill"]) or (sub == "docker" and words[1:2] == ["clean"])):
-                return f"ms-workspace {sub}" + (f" {words[1]}" if sub in ("ps", "docker") else " --skip-gate" if sub == "ship" else "")
+                return f"ms-workspace {sub}" + (" --force" if sub == "clean" else f" {words[1]}" if sub in ("ps", "docker") else " --skip-gate" if sub == "ship" else "")
     return None
 
 
