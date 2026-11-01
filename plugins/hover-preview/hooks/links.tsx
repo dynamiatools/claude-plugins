@@ -75,6 +75,24 @@ const ago = (ms: number) => {
 const sizeOf = (bytes: number) =>
   bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
 
+/** The card of a path: a floating box, drawn over the rows above the link, so nothing moves. */
+function cardOf (Box: any, Text: any, card: Peek) {
+  const width = String(card.lines?.at(-1)?.n ?? 0).length
+  return (
+    <Box flexDirection="column" borderStyle="round" borderDimColor flexShrink={0} backgroundColor="userMessageBackground">
+      <Text bold wrap="truncate-middle">{card.path}</Text>
+      <Text dimColor>
+        {card.kind === 'dir' ? 'folder' : `file · ${sizeOf(card.size)}`} · {ago(card.mtimeMs)}
+        {card.total !== undefined ? ` · ${card.total} lines` : ''}
+      </Text>
+      {card.lines?.map(({ n, text }) => (
+        <Text key={n} wrap="truncate-end" inverse={n === card.line}>{String(n).padStart(width)} {text}</Text>
+      ))}
+      {card.entries?.map(name => <Text key={name} wrap="truncate-end">{name}</Text>)}
+    </Box>
+  )
+}
+
 export const registerLinks: Register = (on) => {
   // Under a reply block that names paths leading somewhere: one link each. The reply itself is
   // drawn by the engine as it was.
@@ -89,12 +107,15 @@ export const registerLinks: Register = (on) => {
     }
     if (links.length === 0) return drawn
     const { Box, Client, Text } = $.ui.resolve(e)
+    const card = await read($, peek)
+    const mine = card !== null && links.some(link => link.path === card.path)
     return (
       <Box flexDirection="column">
         {drawn}
-        <Box flexDirection="row" columnGap={1} flexWrap="wrap" paddingLeft={2}>
+        <Box flexDirection="row" columnGap={1} flexWrap="wrap" paddingLeft={2} position="relative">
           <Text dimColor>↳</Text>
           {links.map((link, i) => <Client key={`peek:${i}`} module="./link.tsx" props={link} />)}
+          {mine && <Box position="absolute" bottom={1} left={2}>{cardOf(Box, Text, card)}</Box>}
         </Box>
       </Box>
     )
@@ -121,31 +142,5 @@ export const registerLinks: Register = (on) => {
       await update($, peek, () => null)
     }
     return result
-  })
-
-  // Above the prompt: the card of the path the pointer is on.
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.surface !== 'terminal' || e.props.hasSurvey || e.viewport?.isFullscreen === false) return next(e)
-    const card = await read($, peek)
-    if (card === null) return next(e)
-    const { Box, Text } = $.ui.resolve(e)
-    const below = await next(e)
-    const width = String(card.lines?.at(-1)?.n ?? 0).length
-    return (
-      <Box flexDirection="column">
-        {below}
-        <Box flexDirection="column" borderStyle="round" borderDimColor flexShrink={0}>
-          <Text bold wrap="truncate-middle">{card.path}</Text>
-          <Text dimColor>
-            {card.kind === 'dir' ? 'folder' : `file · ${sizeOf(card.size)}`} · {ago(card.mtimeMs)}
-            {card.total !== undefined ? ` · ${card.total} lines` : ''}
-          </Text>
-          {card.lines?.map(({ n, text }) => (
-            <Text key={n} wrap="truncate-end" inverse={n === card.line}>{String(n).padStart(width)} {text}</Text>
-          ))}
-          {card.entries?.map(name => <Text key={name} wrap="truncate-end">{name}</Text>)}
-        </Box>
-      </Box>
-    )
   })
 }

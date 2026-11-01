@@ -240,8 +240,8 @@ export const registerImages: Register = (on) => {
     return (
       <Box flexDirection="column">
         {below}
-        {card}
-        <Box flexDirection="row" columnGap={1}>
+        <Box flexDirection="row" columnGap={1} position="relative">
+          {card && <Box position="absolute" bottom={1} left={0}>{card}</Box>}
           {ids.map(id => <Client key={`chip:${id}`} module="./chip.tsx" props={{ label: `[Image #${id}]` }} />)}
           <Text dimColor>hover to preview · click to open</Text>
         </Box>
