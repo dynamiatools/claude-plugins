@@ -557,7 +557,7 @@ class TestGuard(Base):
     def test_blocks_publishing_commands_inside_a_batch(self):
         d = self.ws.batch("b1")
         for cmd in ("git push origin int/b1", "git -C . push --force", "git push", "gh pr create --fill",
-                    "gh pr merge 3", "ms-workspace ship b1 --yes --skip-gate", "ms-workspace clean b1", "ms-workspace promote lib --yes"):
+                    "gh pr merge 3", "ms-workspace ship b1 --yes --skip-gate", "ms-workspace clean b1 --force", "ms-workspace promote lib --yes"):
             with self.subTest(cmd=cmd):
                 r = self.guard(cmd, d / "lib")
                 self.assertEqual(r.returncode, 2, cmd)
@@ -567,7 +567,8 @@ class TestGuard(Base):
     def test_allows_normal_commands_inside_a_batch(self):
         d = self.ws.batch("b1")
         for cmd in ("git status", "git commit -m 'fix push handling'", "ms-workspace test t0", "ls",
-                    "ms-workspace plan b1 --pr", "ms-workspace ship b1", "ms-workspace ship b1 --pr --yes", "rtk ms-workspace ship b1 --yes"):
+                    "ms-workspace plan b1 --pr", "ms-workspace ship b1", "ms-workspace ship b1 --pr --yes", "rtk ms-workspace ship b1 --yes",
+                    "ms-workspace clean b1", "ms-workspace clean"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.guard(cmd, d / "lib").returncode, 0, cmd)
 
