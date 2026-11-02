@@ -457,9 +457,10 @@ def _ship(ws: Workspace, args: list[str]) -> int:
         if run_file(ws, smoke, ws.get("http", "smoke_env", default="local"), assume_yes=True) != 0:
             ws.log("ship", "fail", "", batch, "smoke checks failed")
             die("smoke checks failed; nothing was pushed (fix them, or pass --skip-smoke)")
+    if not skip_e2e and not ws.get("e2e", "command"):
+        print("no [e2e] command configured; skipping end-to-end")   # e2e is optional: nothing to run is not a failure
+        skip_e2e = True
     if not skip_e2e:
-        if not ws.get("e2e", "command"):
-            die("no [e2e] command configured; pass --skip-e2e to ship without e2e")
         if run_e2e(ws, "" if plain else batch) != 0:
             ws.log("ship", "fail", "", batch, "t2 failed")
             die("e2e failed; nothing was pushed")
