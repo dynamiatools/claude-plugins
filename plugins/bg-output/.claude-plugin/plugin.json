@@ -1,12 +1,20 @@
 {
   "name": "bg-output",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "author": {
     "name": "Mario Serrano"
   },
-  "description": "A side pane that opens by itself and shows the live output of long-running background commands such as mvn, gradle, java and node.",
+  "description": "A side pane with the live output of long-running background commands such as mvn, gradle, java and node. Opens with /bg-output, or by itself if you turn on autoOpen.",
   "license": "MIT",
   "homepage": "https://github.com/dynamiatools/claude-plugins/tree/master/plugins/bg-output",
   "repository": "https://github.com/dynamiatools/claude-plugins",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "autoOpen": {
+      "type": "boolean",
+      "title": "Open the pane by itself",
+      "description": "Open the pane when a watched background command starts. Off by default: use /bg-output.",
+      "default": false
+    }
+  }
 }

@@ -10,8 +10,11 @@ const TAIL_CHARS = 6000
 const IDLE_MS = 10_000
 const jobs = atom({ plugin: 'bg-output', key: 'jobs' } as const, [], { shape: 'jobs-1' })
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const isAutoOpen = options?.autoOpen === true
+
   on('session.start', async ($, e, next) => {
+    await $.command.register({ name: 'bg-output', description: 'Open the background output pane' })
     $.clock.every(1000, async () => {
       const list = await read($, jobs)
       const now = await $.clock.now()
@@ -50,9 +53,15 @@ export const register: Register = on => {
     const now = await $.clock.now()
     const job: Job = { id, command: e.command, file, tail: '', changedAt: now, startedAt: now }
     await update($, jobs, list => [...list.filter(one => one.id !== id), job].slice(-KEEP))
-    void $.ui.open({ id: PANE, title: 'Background output' })
+    if (isAutoOpen) void $.ui.open({ id: PANE, title: 'Background output' })
 
     return ran
+  })
+
+  on('command.run', { command: 'bg-output' }, async $ => {
+    await $.ui.open({ id: PANE, title: 'Background output' })
+
+    return { text: 'Background output pane opened.' }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

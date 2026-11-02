@@ -68,7 +68,7 @@
     {
       "name": "bg-output",
       "source": "./plugins/bg-output",
-      "description": "A side pane that opens by itself and shows the live output of long-running background commands such as mvn, gradle, java and node."
+      "description": "A side pane that shows, opened with /bg-output, the live output of long-running background commands such as mvn, gradle, java and node."
     },
     {
       "name": "issue-board",

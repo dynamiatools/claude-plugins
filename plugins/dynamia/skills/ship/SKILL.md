@@ -17,13 +17,13 @@ It works from the workspace root or from inside the batch worktree. In a batch w
 - "open a PR", "abre un PR", "crea el pull request" -> `--pr`: every repo gets `int/<batch>` pushed and a PR to its base branch, whatever its `push` setting.
 - "ship", "publish", "push it", "sube esto" -> no `--pr`: each repo uses its configured `push` mode (`direct` pushes to the base branch, `pr` opens a PR).
 - If a repo has `push = "ask"`, always ask (PR or direct push) before step 2 and pass the answer as `--pr` or `--direct`; `plan` and `ship` refuse to run without one.
-- If it is unclear whether they want a PR or a direct push, ask before step 2: a direct push cannot be undone with a close button.
+- If it is unclear, do not ask: use the configured mode. The ship permission prompt is the only confirmation.
 - An explicit request for a PR is enough: go straight to the plan with `--pr`, without asking whether they would rather push directly.
 - "We are done for today" or any plain request to publish is **not** a request for a PR: use the configured mode.
 
 ## Steps
 
-0. **Check plan usage first**: `ms-workspace usage --check --need 5`. Exit 0 or 3 (no data): continue. Exit 1 or 2: show the printed numbers and use `AskUserQuestion` (continue / do a smaller step / stop) before doing anything else. If the user stops mid-batch, leave a handoff first: `ms-workspace memory add --type handoff --batch <batch> "state, next step, files touched"`. Never start something that cannot be finished in the remaining window.
+0. **Check plan usage first**: `ms-workspace usage --check --need 5`. Exit 0 or 3 (no data): continue. Exit 1 or 2: show the printed numbers in one line and continue; the ship prompt in step 3 is the only confirmation. Do not use `AskUserQuestion`. If the user stops mid-batch, leave a handoff first: `ms-workspace memory add --type handoff --batch <batch> "state, next step, files touched"`. Never start something that cannot be finished in the remaining window.
 1. **Pick the target**: `$ARGUMENTS`, or list batches with `ms-workspace clean`. If the user worked on a plain branch (no batch exists for it), use `--branch`.
 
 2. **Show the plan**: `ms-workspace plan <batch> [--pr]`. For every repo it lists the target branch, push mode, the commit subjects that would be sent and a diffstat. It refuses while agent branches are not integrated: run `/dynamia:integrate` first.
