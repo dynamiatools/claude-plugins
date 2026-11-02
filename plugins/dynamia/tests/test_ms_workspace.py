@@ -609,6 +609,32 @@ class TestOverview(Base):
         self.assertIn("open tasks", out)
         self.assertIn("Recent actions", out)
 
+    def _setupcheck(self, settings=None, links=()):
+        home, binp = self.ws.tmp / "ch", self.ws.tmp / "bin"
+        home.mkdir(exist_ok=True)
+        binp.mkdir(exist_ok=True)
+        if settings is not None:
+            (home / "settings.json").write_text(json.dumps(settings))
+        for name, target in links:
+            (binp / name).symlink_to(target)
+        return self.ws.ms("setupcheck", cwd=self.ws.tmp, env={"CLAUDE_HOME": str(home), "BIN_DIR": str(binp)})
+
+    def test_setupcheck_warns_when_status_line_is_missing_or_dangling(self):
+        for cfg in ({}, {"statusLine": {"type": "command", "command": '"/nope/0.7.0/bin/ms-statusline"'}}):
+            r = self._setupcheck(cfg)
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("/dynamia:setup", json.loads(r.stdout)["systemMessage"])
+
+    def test_setupcheck_warns_on_a_broken_launcher(self):
+        shutil.copy(sys.executable, self.ws.tmp / "ms-statusline")
+        ok = {"statusLine": {"type": "command", "command": str(self.ws.tmp / "ms-statusline")}}
+        r = self._setupcheck(ok, links=[("ms-workspace", "/gone/ms-workspace")])
+        self.assertIn("broken link", json.loads(r.stdout)["systemMessage"])
+
+    def test_setupcheck_is_silent_when_fine_or_user_has_another_status_line(self):
+        r = self._setupcheck({"statusLine": {"type": "command", "command": "echo hi"}})
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+
     def test_context_is_silent_outside_a_workspace(self):
         r = self.ws.ms("context", cwd=self.ws.tmp)
         self.assertEqual((r.returncode, r.stdout), (0, ""))
@@ -1821,7 +1847,7 @@ class TestPackaging(unittest.TestCase):
         data = json.loads((REPO / "settings" / "hooks.example.json").read_text())
         cmds = {h["command"] for groups in data["hooks"].values() for g in groups for h in g["hooks"]}
         self.assertEqual(cmds, {"ms-workspace guard", "ms-workspace context", "ms-workspace images capture", "ms-workspace readguard",
-                                "ms-workspace outguard", "ms-workspace readguard --reset", "ms-workspace handoff --hook", "ms-workspace notify --hook"})
+                                "ms-workspace outguard", "ms-workspace setupcheck", "ms-workspace readguard --reset", "ms-workspace handoff --hook", "ms-workspace notify --hook"})
         self.assertNotIn("Bash(ms-workspace:*)", data["permissions"]["allow"])
         self.assertTrue({"Bash(ms-workspace ship:*)", "Bash(ms-workspace clean:*)", "Bash(ms-workspace undo:*)", "Bash(ms-workspace promote:*)"} <= set(data["permissions"]["ask"]))
         self.assertEqual(data["statusLine"]["command"], "ms-statusline")

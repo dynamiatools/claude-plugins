@@ -97,6 +97,9 @@ def _dispatch(cmd: str, args: list[str]) -> int:
     if cmd == "context":
         from .overview import cmd_context
         return cmd_context(Workspace.load(required=False))
+    if cmd == "setupcheck":
+        from .setup import cmd_setupcheck
+        return cmd_setupcheck()
     if cmd == "readguard":
         from .hooks import cmd_readguard
         return cmd_readguard(args)

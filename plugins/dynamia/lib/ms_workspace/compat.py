@@ -2,7 +2,7 @@
 import sys
 
 MIN = (3, 11)
-QUIET_HOOKS = ("context", "images")  # hooks that must never print errors into a session
+QUIET_HOOKS = ("context", "images", "setupcheck")  # hooks that must never print errors into a session
 
 
 def check(argv, version=None):
