@@ -30,6 +30,11 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ms-workspace\" context",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ms-workspace\" setupcheck",
+            "timeout": 5
           }
         ]
       },

@@ -321,3 +321,33 @@ def cmd_setup_hooks(args: list[str]) -> int:
     elif not changed:
         print("Already up to date." if not undo else "Nothing to remove.")
     return 0
+
+
+def setup_problem() -> str | None:
+    """One line saying what is missing or broken in the user-level install, or None. Reads files only, never raises."""
+    try:
+        cfg = json.loads(settings_path().read_text()) if settings_path().exists() else {}
+        cmd = ((cfg.get("statusLine") or {}).get("command") or "").strip().strip('"')
+        if not cmd:
+            return "the usage status line is not installed"
+        if cmd.endswith("ms-statusline"):  # ours; another status line is the user's choice
+            exists = Path(cmd).exists() if "/" in cmd else shutil.which(cmd) is not None
+            if not exists:
+                return f"the status line points to a missing file ({cmd})"
+        for name in BIN_NAMES:
+            link = bin_dir() / name
+            if link.is_symlink() and not link.exists():
+                return f"{link} is a broken link"
+    except Exception:
+        return None
+    return None
+
+
+def cmd_setupcheck() -> int:
+    """SessionStart hook: tell the user, once per session, when /dynamia:setup is needed. Silent otherwise."""
+    if os.environ.get("MS_NO_SETUP_NUDGE"):
+        return 0
+    problem = setup_problem()
+    if problem:
+        print(json.dumps({"systemMessage": f"dynamia: {problem}. Run /dynamia:setup, then restart Claude Code."}))
+    return 0
