@@ -410,13 +410,11 @@ class TestShip(Base):
         self.assertOk(self.ws.ms("ship", "b1", "--yes", "--direct"))
         self.assertIn("lib feature", self.ws.remote_log("lib"))
 
-    def test_missing_e2e_requires_explicit_skip(self):
+    def test_missing_e2e_is_skipped_with_a_note(self):
         self.ws.set_toml(DEFAULT_TOML)
         r = self.ws.ms("ship", "b1", "--yes")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("--skip-e2e", r.stderr)
-        self.assertNotIn("lib feature", self.ws.remote_log("lib"))
-        self.assertOk(self.ws.ms("ship", "b1", "--yes", "--skip-e2e"))
+        self.assertOk(r)
+        self.assertIn("no [e2e] command configured", r.stdout)
         self.assertIn("lib feature", self.ws.remote_log("lib"))
 
     def test_failing_t1_blocks_the_push(self):
@@ -2054,6 +2052,16 @@ class TestPrMode(Base):
         self.assertIn("pr create --base next --head int/b1", (self.ws.tmp / "gh-calls").read_text())
         undo = self.ws.ms("undo", "b1", env=env)
         self.assertIn("gh pr close", undo.stdout)
+
+    def test_pr_title_and_body_file_are_accepted_and_passed_to_gh(self):
+        body = self.ws.tmp / "body.md"
+        body.write_text("Why this change exists")
+        env = {"PATH": self.fake_path(True)}
+        r = self.ws.ms("ship", "b1", "--yes", "--pr", "--skip-e2e", "--title", "Add the feature", "--body-file", str(body), env=env)
+        self.assertOk(r)
+        call = (self.ws.tmp / "gh-calls").read_text()
+        self.assertIn("--title Add the feature --body Why this change exists", call)
+        self.assertIn("unknown option", self.ws.ms("ship", "b1", "--bogus", env=env).stderr + self.ws.ms("ship", "b1", "--bogus", env=env).stdout)
 
     def test_big_changes_get_a_pr_recommendation_but_the_mode_is_not_changed(self):
         self.ws.set_toml(DEFAULT_TOML + "[ship]\nrecommend_pr_new_files = 3\nrecommend_pr_files = 0\n")
