@@ -43,6 +43,7 @@ public class StandardViewModel {
 }
 ```
 - Standard ZK binding: `@Init`, `@AfterCompose`, `@Command`, `@NotifyChange`, `@BindingParam`. Dynamia adds `tools.dynamia.zk.AbstractViewModel<T>` and `FormCrudViewModel<T>` as optional bases, and utilities `ZKUtil`, `ZKBindingUtil`, `CrudView`, `FormView`, `CrudState`.
+- **Actions use UI ports, not ZK classes.** In an action, prefer `UIMessages`, `UIFiles` (download, upload, preview), `UIClipboard.copy`, `UINavigation` (`openPage`, `refresh`), `UIChoices` (`chooseOne`, `pickEntity`), `UIProgress.run` and `UIViews.showForm` over `Messagebox`, `Filedownload`, `Executions`, `Window`: ZK has an adapter for each and behavior is the same, and the action can then be `HeadlessCapable` for Vue/REST clients (`dynamia-platform:backend`, `references/headless-actions.md`). ZK classes stay fine in ZUL view models and pure-UI actions. A toolbar filter widget is a `FilterAction` with a `Control` (ZK maps it with `ControlRenderers.adapt`), not a hand-built `ActionRenderer<Component>`.
 - User messages: `UIMessages.showMessage("text", MessageType.WARNING)`, `showQuestion(text, onYes)`, `showMessageDialog`. Throw `ValidationError` for rule violations.
 - Pages are registered in a `ModuleProvider` with `new Page(id, name, "classpath:/pages/x.zul")`.
 

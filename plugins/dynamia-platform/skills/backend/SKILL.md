@@ -7,7 +7,7 @@ description: Dynamia Platform backend patterns for any project using tools.dynam
 
 Dynamia APIs are not deducible from general Spring knowledge. Before writing:
 1. Run `${CLAUDE_PLUGIN_ROOT}/bin/dp-detect --facts` for the version, and read how the module you touch already does it. **Follow the module's conventions over this page.**
-2. Verify signatures in the project's own sources or the docs (`dynamia-platform:docs`), not from memory. Versions are CalVer (`YY.MM.N`); APIs here were checked against 26.10.
+2. Verify signatures in the project's own sources or the docs (`dynamia-platform:docs`), not from memory. Versions are CalVer (`YY.MM.N`); APIs here were checked against 26.11.
 3. Reference app: `examples/demo-zk-books` in `dynamiatools/framework`.
 
 ## Stereotypes
@@ -77,7 +77,7 @@ public class ReprocessAction extends AbstractCrudAction {
     }
 }
 ```
-`@InstallAction` self-registers. To make an action work for REST clients too, mark it `HeadlessCapable` and follow `references/headless-actions.md`. `setApplicableClass` limits it to an entity; `setGroup(ActionGroup.get("CRUD"))` puts it with the standard toolbar; override `isEnabled(Object)` / `isVisible()` for rules; inside use the inherited `crudService()`. Long work: `ProgressMonitor` + `SchedulerUtil`, not the UI thread. Name `VerbNounAction`.
+`@InstallAction` self-registers. To make an action work for REST clients too, mark it `HeadlessCapable`, talk to the user only through the UI ports (`UIMessages`, `UIFiles`, `UIClipboard`, `UINavigation`, `UIChoices`, `UIProgress`, `UIViews`, never `Messagebox`/`Filedownload`/`Executions`) and follow `references/headless-actions.md`. A toolbar widget that filters the list (date range, combo, search box) is a `FilterAction` with a `Control`, not a ZK renderer: `references/portable-controls.md`. `setApplicableClass` limits it to an entity; `setGroup(ActionGroup.get("CRUD"))` puts it with the standard toolbar; override `isEnabled(Object)` / `isVisible()` for rules; inside use the inherited `crudService()`. Long work: `ProgressMonitor` + `SchedulerUtil`, not the UI thread. Name `VerbNounAction`.
 
 ## Validators and listeners
 `Validator<T>.validate(T)` is `void` and fails by **throwing** `ValidationError`; it runs on `CrudService.create/update/save`. Register with `@Provider`. Never validate in `@PrePersist`.
@@ -153,7 +153,8 @@ params: { orderBy: title }
 ## References (read the one you need)
 | Topic | File |
 |---|---|
-| Actions that run in ZK and for REST clients (headless, replay, flow steps) | `references/headless-actions.md` |
+| Actions that run in ZK and for REST clients (headless, replay, flow steps, the UI ports table, `EntityLookup`) | `references/headless-actions.md` |
+| Toolbar filter controls (`Control`, `FilterAction`), `POST /find` with `QuerySpec`, `QuerySpecFilter` | `references/portable-controls.md` |
 | `CrudService` methods, `QueryParameters`, the String-is-LIKE default, `QueryConditions`, writing new conditions | `references/crud-service.md` |
 | `EntityHandler` and the `DomainUtils` helpers | `references/entity-handler-domain-utils.md` |
 | All `dynamia.*` configuration properties and defaults | `references/configuration-properties.md` |

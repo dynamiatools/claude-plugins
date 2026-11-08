@@ -57,7 +57,7 @@ assertThat(r.types()).containsExactly(CONFIRM, NOTIFY);
 - Write one test per action path: confirmed, cancelled, validation error, no permission. Assert on `types()` and on the data in the (mock) service.
 
 ## Port contracts
-`ui-contract` has a suite per UI port (messages, choices, files, views, navigation, progress). To add a UI adapter (a new front end), subclass the contract of the port and implement `driver()`. The framework's own adapters run the same suites (`TestPlatform*PortContractTest`, `Replay*PortContractTest`), so behavior stays identical across ZK, tests and the REST replay.
+`ui-contract` has a suite per UI port (messages, choices incl. `pickEntity`, files incl. `preview`, clipboard, views, navigation incl. `openPage`/`refresh`, progress). To add a UI adapter (a new front end), subclass the contract of the port and implement `driver()`. The framework's own adapters run the same suites (`TestPlatform*PortContractTest`, `Replay*PortContractTest`), so behavior stays identical across ZK, tests and the REST replay.
 
 ## Architecture rules
 `arch-rules` reads sources and `pom.xml` files (no build needed) as JUnit tests: R1 ZK only in the corner paths, R2 inventory of front-end-bound actions, R3 no published action bound to the front end, R4 every `@InstallAction` declares a runtime, R5 no `ZK` in neutral identifiers, R6 parity (every standard action usable by a remote client). A **baseline** lists today's violations and only shrinks: a new violation fails, and so does a fixed one still listed. Update with `-Dui.baseline.update=true`, review the diff, commit. To adopt in your repo: add the test dependency, create an `ArchRulesConfig` (`forZk(baselineDir, cornerPaths)` or the full constructor), and extend each rule class returning it.
