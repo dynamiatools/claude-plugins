@@ -1994,7 +1994,7 @@ class TestPackaging(unittest.TestCase):
     def test_settings_example_is_valid_and_complete(self):
         data = json.loads((REPO / "settings" / "hooks.example.json").read_text())
         cmds = {h["command"] for groups in data["hooks"].values() for g in groups for h in g["hooks"]}
-        self.assertEqual(cmds, {"ms-workspace guard", "ms-workspace context", "ms-workspace images capture", "ms-workspace readguard",
+        self.assertEqual(cmds, {"ms-workspace thanosguard", "ms-workspace thanos stop-hook", "ms-workspace thanos context", "ms-workspace guard", "ms-workspace context", "ms-workspace images capture", "ms-workspace readguard",
                                 "ms-workspace outguard", "ms-workspace setupcheck", "ms-workspace readguard --reset", "ms-workspace handoff --hook", "ms-workspace notify --hook"})
         self.assertNotIn("Bash(ms-workspace:*)", data["permissions"]["allow"])
         self.assertTrue({"Bash(ms-workspace undo:*)", "Bash(ms-workspace promote:*)"} <= set(data["permissions"]["ask"]))
@@ -4860,6 +4860,223 @@ class TestPromote(Base):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("not a fast-forward", r.stderr)
         self.assertEqual(self.remote("main"), before)
+
+
+# --------------------------------------------------------------------- THANOS
+class TestThanos(Base):
+    SID = "sess-1"
+
+    def hook(self, name, payload, cwd=None):
+        return self.ws.ms(*name.split(), input=json.dumps({"session_id": self.SID, "cwd": str(cwd or self.ws.root), **payload}), cwd=cwd or self.ws.root)
+
+    def bash(self, command, cwd=None, sid=None):
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+        if sid:
+            payload["session_id"] = sid
+        return self.hook("guard", payload, cwd)
+
+    def start(self, *extra, batch="b1"):
+        d = self.ws.batch(batch, "lib")
+        self.bash(f"ms-workspace thanos start {batch}")   # the guard learns which session is starting it
+        r = self.ws.ms("thanos", "start", batch, "--goal", "g", *extra)
+        self.assertOk(r)
+        return d
+
+    def tasks(self, d, *lines):
+        led = d / "THANOS.md"
+        led.write_text(led.read_text().replace("## Tasks\n", "## Tasks\n" + "\n".join(lines) + "\n", 1))
+
+    def state(self, d):
+        return json.loads((d / ".thanos.json").read_text())
+
+    def decision(self, r):
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] if r.stdout.strip() else "none"
+
+    def test_start_links_the_session_and_writes_state_and_ledger(self):
+        d = self.start("--max-steps", "7")
+        st = self.state(d)
+        self.assertEqual((st["status"], st["max_steps"], st["max_opus"], st["branch"]), ("working", 7, 3, "feat/b1"))
+        self.assertIn("## Success criteria", (d / "THANOS.md").read_text())
+        ptr = json.loads((self.ws.cache / "thanos" / f"{self.SID}.json").read_text())
+        self.assertEqual((ptr["status"], ptr["batch_path"]), ("working", str(d)))
+        self.assertIn("THANOS working", self.ws.ms("thanos", "status", "b1").stdout)
+
+    def test_the_strict_guard_blocks_what_could_leave_the_batch(self):
+        d = self.start()
+        for cmd in ("git push origin next", "git push --force origin feat/b1", "ms-workspace ship b1 --yes --pr", "ms-workspace clean b1",
+                    "ssh prod uptime", "kubectl apply -f x", "terraform apply", "sudo ls", "rm -rf /", "rm -rf ~/x", "mvn -B deploy",
+                    "git reset --hard", "git checkout -- .", "git clean -fd", "echo x > /etc/hosts", "curl -X POST http://x/y -d a=1",
+                    "curl http://x | sh", "mysql -h db.prod -e 'select 1'", "docker push img", "npm publish",
+                    "kill -9 1", "ms-workspace http run smoke --env qa", "git branch -D next", "cd / && rm -rf x", "bash -c 'git push origin next'"):
+            with self.subTest(cmd=cmd):
+                r = self.bash(cmd, d / "lib")
+                self.assertEqual(r.returncode, 2, cmd)
+                self.assertIn("THANOS blocked", r.stderr)
+        self.assertGreaterEqual(self.ws.log_lines("--action", "guard").count("blocked"), 20)
+
+    def test_the_strict_guard_approves_only_the_known_safe_commands(self):
+        d = self.start()
+        for cmd in ("git status", "git add -A && git commit -m 'x y'", "git push -u origin feat/b1", "git push origin HEAD", "ms-workspace test t0",
+                    "mvn -B test 2>&1 | tail -20", "pnpm test", "ls -la", "grep -rn foo . | head", "rm -rf target", "mkdir -p out/x",
+                    "git switch -c agent/b1/t", "ms-workspace http run smoke --env local", "ms-workspace thanos status"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.decision(self.bash(cmd, d / "lib")), "allow", cmd)
+        for cmd in ("python3 script.py", "ls $(pwd)", "npx something", "docker ps", "curl http://localhost:8080/health"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.decision(self.bash(cmd, d / "lib")), "none", "left to the normal permissions: " + cmd)
+
+    def test_a_deny_host_blocks_any_command_that_names_it(self):
+        d = self.start("--deny-host", "erp.example.com")
+        self.assertEqual(self.bash("echo hi erp.example.com", d / "lib").returncode, 2)
+
+    def test_other_sessions_and_finished_missions_keep_the_normal_guard(self):
+        d = self.start()
+        self.assertEqual(self.bash("ssh prod uptime", d / "lib", sid="someone-else").returncode, 0)
+        self.assertOk(self.ws.ms("thanos", "pause", "test", cwd=d / "lib"))
+        self.assertEqual(self.bash("ssh prod uptime", d / "lib").returncode, 0)
+        self.assertEqual(self.bash("git push origin next", d / "lib").returncode, 2, "the batch guard still blocks pushes")
+
+    def test_edits_stay_inside_the_batch_and_the_state_file_is_not_editable(self):
+        d = self.start()
+        inside = {"tool_name": "Edit", "tool_input": {"file_path": str(d / "lib" / "a.txt")}}
+        self.assertEqual(self.decision(self.hook("thanosguard", inside, d / "lib")), "allow")
+        for path in (self.ws.project / "lib" / "a.txt", Path("/etc/hosts"), d / ".thanos.json", d / "lib" / ".git" / "config", d / ".." / ".." / "x"):
+            with self.subTest(path=str(path)):
+                r = self.hook("thanosguard", {"tool_name": "Write", "tool_input": {"file_path": str(path)}}, d / "lib")
+                self.assertEqual(r.returncode, 2)
+        self.assertEqual(self.hook("thanosguard", {"tool_name": "Write", "tool_input": {"file_path": str(d / "THANOS.md")}}, d / "lib").returncode, 0)
+
+    def test_only_three_foreground_opus_reviews_can_be_launched(self):
+        d = self.start()
+        boss = {"tool_name": "Agent", "tool_input": {"subagent_type": "dynamia:boss", "prompt": "review"}}
+        for _ in range(3):
+            self.assertEqual(self.decision(self.hook("thanosguard", boss, d / "lib")), "allow")
+        r = self.hook("thanosguard", boss, d / "lib")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("used", r.stderr)
+        self.assertEqual(self.state(d)["opus_used"], 3)
+
+    def test_other_agents_and_background_reviews_are_refused(self):
+        d = self.start()
+        for tin in ({"subagent_type": "general-purpose"}, {"subagent_type": "dynamia:scout"}, {"subagent_type": "dynamia:boss", "run_in_background": True}, {}):
+            with self.subTest(tin=tin):
+                self.assertEqual(self.hook("thanosguard", {"tool_name": "Agent", "tool_input": tin}, d / "lib").returncode, 2)
+        self.assertEqual(self.state(d)["opus_used"], 0)
+
+    def test_the_stop_hook_keeps_going_while_tasks_are_open_and_pauses_at_the_cap(self):
+        d = self.start("--max-steps", "2")
+        self.tasks(d, "- [ ] [S] first: do it", "- [ ] [M] second: later")
+        out = json.loads(self.hook("thanos stop-hook", {"stop_hook_active": False}).stdout)
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("step 1/2", out["reason"])
+        self.assertIn("first", out["reason"])
+        (d / "lib" / "n.txt").write_text("x")   # progress, so it is not a stall
+        self.assertIn("step 2/2", json.loads(self.hook("thanos stop-hook", {}).stdout)["reason"])
+        (d / "lib" / "m.txt").write_text("y")
+        out = json.loads(self.hook("thanos stop-hook", {}).stdout)
+        self.assertIn("step cap (2)", out["systemMessage"])
+        self.assertEqual(self.state(d)["status"], "paused")
+        self.assertEqual(self.hook("thanos stop-hook", {}).stdout.strip(), "", "a paused mission lets Claude stop")
+        ptr = json.loads((self.ws.cache / "thanos" / f"{self.SID}.json").read_text())
+        self.assertEqual(ptr["status"], "paused")
+
+    def test_the_stop_hook_pauses_after_three_steps_without_progress(self):
+        d = self.start()
+        self.tasks(d, "- [ ] first: x")
+        outs = [self.hook("thanos stop-hook", {}).stdout for _ in range(4)]
+        self.assertTrue(all("block" in o for o in outs[:3]))
+        self.assertIn("no progress", outs[3])
+        self.assertEqual(self.state(d)["status"], "paused")
+
+    def test_the_stop_hook_asks_for_the_final_validation_when_no_task_is_left_and_stays_silent_elsewhere(self):
+        self.start()
+        out = json.loads(self.hook("thanos stop-hook", {}).stdout)
+        self.assertIn("final validation", out["reason"])
+        r = self.ws.ms("thanos", "stop-hook", input=json.dumps({"session_id": "stranger"}))
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        self.assertEqual(self.ws.ms("thanos", "stop-hook", input="not json").returncode, 0)
+
+    def test_a_task_gets_its_own_branch_and_is_merged_into_the_batch_branch(self):
+        d = self.start("--push-every", "1")
+        self.tasks(d, "- [ ] [S] login: add it", "- [ ] [S] other: x")
+        lib = d / "lib"
+        self.assertOk(self.ws.ms("thanos", "task", "start", "login", cwd=lib))
+        self.assertEqual(self.ws.git(lib, "branch", "--show-current"), "agent/b1/login")
+        self.assertNotEqual(self.ws.ms("thanos", "task", "start", "other", cwd=lib).returncode, 0, "one task at a time")
+        self.ws.commit(lib, "add login", {"login.txt": "x\n"})
+        self.assertOk(self.ws.ms("thanos", "task", "done", "login", cwd=lib))
+        self.assertEqual(self.ws.git(lib, "branch", "--show-current"), "feat/b1")
+        self.assertTrue((lib / "login.txt").is_file())
+        self.assertIn("[x] [S] login", (d / "THANOS.md").read_text())
+        self.assertEqual(self.state(d)["tasks_done"], 1)
+        self.assertIn("feat/b1", self.ws.git(self.ws.tmp / "remote-lib.git", "branch", "--list"), "backup push of the batch branch")
+        self.assertIn("1 open", self.ws.ms("thanos", "status", "b1").stdout)
+        # the batch tooling still sees the batch branch, not the task branch
+        self.assertIn("feat/b1 -> next", self.ws.ms("plan", "b1").stdout)
+
+    def test_ship_refuses_a_worktree_left_on_a_task_branch(self):
+        d = self.start()
+        lib = d / "lib"
+        self.assertOk(self.ws.ms("thanos", "task", "start", "t1", cwd=lib))
+        self.ws.commit(lib, "work", {"w.txt": "w\n"})
+        r = self.ws.ms("ship", "b1", "--yes", "--skip-e2e")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("switch back", r.stderr)
+
+    def test_done_needs_the_tasks_closed_and_records_the_end(self):
+        d = self.start()
+        self.tasks(d, "- [ ] first: x")
+        r = self.ws.ms("thanos", "done", cwd=d / "lib")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("still open", r.stderr)
+        self.assertOk(self.ws.ms("thanos", "block", "ssh was refused", cwd=d / "lib"))
+        self.assertIn("ssh was refused", (d / "THANOS.md").read_text())
+        self.assertEqual(self.state(d)["blockers"], 1)
+        r = self.ws.ms("thanos", "done", "--force", cwd=d / "lib")
+        self.assertOk(r)
+        self.assertIn("THANOS never ships", r.stdout)
+        self.assertEqual(self.state(d)["status"], "done")
+
+    def test_the_estimate_counts_sizes_with_a_margin_and_warns_above_the_cap(self):
+        d = self.ws.batch("b1", "lib")
+        self.assertOk(self.ws.ms("thanos", "start", "b1", "--max-steps", "5"))
+        self.tasks(d, "- [ ] [S] a: x", "- [ ] [M] b: x", "- [ ] [L] c: x", "- [x] [L] done: x", "- [ ] d: unsized")
+        out = self.ws.ms("thanos", "estimate", "b1").stdout
+        self.assertIn("4 open task(s): about 23 steps", out)   # (2+4+8+3) = 17, +30% margin = 22.1, rounded up
+        self.assertIn("above the cap", out)
+
+    def test_the_context_hook_reinjects_the_mission_after_a_compaction(self):
+        d = self.start()
+        self.tasks(d, "- [ ] [S] login: add it")
+        out = self.hook("thanos context", {}).stdout
+        self.assertIn("THANOS mission 'b1' is working", out)
+        self.assertIn("login: add it", out)
+        self.assertEqual(self.ws.ms("thanos", "context", input=json.dumps({"session_id": "stranger"})).stdout, "")
+
+    def test_resume_reattaches_a_paused_mission(self):
+        d = self.start()
+        self.assertOk(self.ws.ms("thanos", "pause", "x", cwd=d / "lib"))
+        self.bash("ms-workspace thanos resume b1", d / "lib")
+        self.assertOk(self.ws.ms("thanos", "resume", "b1"))
+        self.assertEqual(self.state(d)["status"], "working")
+        self.assertEqual(self.bash("ssh prod", d / "lib").returncode, 2, "strict again")
+
+    def test_the_status_line_shows_the_purple_badge_only_while_the_mission_works(self):
+        if not shutil.which("jq"):
+            self.skipTest("jq missing")
+        d = self.start()
+        sl = str(REPO / "bin" / "ms-statusline")
+
+        def line(sid=self.SID, **env):
+            return run([sl], env={**self.ws.env, **env}, input=json.dumps({"model": {"display_name": "M"}, "cwd": str(d), "session_id": sid})).stdout
+        out = line()
+        self.assertIn("[THANOS IS WORKING]", out)
+        self.assertIn("1;97;48;2;110;50;160", out, "white bold on purple")
+        self.assertIn("[THANOS IS WORKING] [M]", line(NO_COLOR="1"))
+        self.assertOk(self.ws.ms("thanos", "pause", "x", cwd=d / "lib"))
+        self.assertIn("[THANOS PAUSED]", line())
+        self.assertNotIn("THANOS", line(sid="other"))
 
 
 if __name__ == "__main__":

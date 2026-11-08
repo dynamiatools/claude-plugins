@@ -20,6 +20,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ms-workspace\" thanosguard",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -47,6 +57,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ms-workspace\" thanos context",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "Stop": [
@@ -61,6 +81,11 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ms-workspace\" handoff --hook",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ms-workspace\" thanos stop-hook",
+            "timeout": 20
           }
         ]
       }

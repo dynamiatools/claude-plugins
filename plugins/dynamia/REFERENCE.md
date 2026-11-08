@@ -33,6 +33,24 @@ A repo can set `env = ["NAME=value", ...]` in `workspace.toml`; those variables 
 
 Names are validated, and a failed `batch new` or `agent new` rolls back what it created. `ms-workspace env [batch] [--setup] [--trust]` re-copies ignored files, runs each repo's `setup` command and marks worktrees as trusted so background agents skip the trust dialog.
 
+## THANOS: autonomous missions
+
+`/dynamia:thanos` runs a goal to the end with few interruptions, and uses everything above: it opens a batch (always a worktree, never your checkout), works one task at a time, and leaves integrating and shipping to you. It does not add permissions: it adds a stricter profile and a loop.
+
+| Piece | What it does |
+|---|---|
+| `thanos start <batch> [--max-steps N] [--max-opus N] [--push-every N] [--deny-host H]` | Opens the mission: state in `<batch>/.thanos.json` (written only by the tool), the ledger `<batch>/THANOS.md` (goal, criteria, tasks `- [ ] [S\|M\|L] name`, decisions, failed attempts, blockers), and a pointer per session that the hooks and the status line read |
+| `thanos estimate` | Open tasks as steps: S=2, M=4, L=8, unsized 3, plus 30 %. `start` warns when it is above the cap (default 30; `[thanos] max_steps` or `--max-steps`) |
+| `thanos task start <name>` / `task done <name>` | A branch `agent/<batch>/<name>` per task inside the batch worktree; `done` merges it `--no-ff` into the batch branch, ticks the ledger and, every `push_every` tasks, pushes the batch branch to origin as a backup. A conflict leaves you on the task branch. The batch branch name is recorded in `<batch>/BRANCH`, so `ship`, `integrate` and `clean` keep working while the worktree sits on a task branch (and refuse to run until it is back) |
+| `thanos block "<why>"`, `pause`, `resume`, `done [--force]`, `stop`, `status` | Bookkeeping; `done` refuses while tasks are open. Pausing writes the usual handoff |
+| Stop hook (`thanos stop-hook`) | While tasks are open it answers `block` with the next task, so Claude keeps going. Each continuation is a **step**. It pauses (and lets Claude stop) at the step cap, at critical plan usage, or after three steps with no change in tasks or commits; it fails open on any error |
+| SessionStart hook (`thanos context`) | After a compaction or a resume it re-injects goal, counters and the next open tasks |
+| `thanosguard` (PreToolUse on Edit, Write, NotebookEdit and Agent) | Edits are approved without a prompt only inside the batch worktree (never `.git/` or `.thanos.json`). The only agent allowed is `dynamia:boss` (Opus), in the foreground, `max_opus` times (3: before starting, at the end, one rescue); each one is counted |
+| Strict Bash profile (inside `guard`) | During a working mission, **blocks**: any push except `git push origin <the batch branch>`, `ship`, `clean`, `undo`, `promote`, `gh`, `ssh`/`scp`/`rsync`, `kubectl`, `terraform`, `ansible`, cloud CLIs, deploy and publish commands (`mvn deploy`, `npm publish`, `docker push`), `sudo`, `kill`, `rm -r` outside the batch, `git reset --hard`, `clean -f`, `checkout -- .`, writes or redirections outside the batch, database clients against a non-local host or with drop/truncate/delete-all, `curl` that sends data, a download piped into a shell, `http run` against anything but `--env local`, and any command naming a `deny_hosts` entry. **Approves without a prompt** only a short known-safe list (git add/commit/switch/merge, `test`, `integrate`, mvn/gradle/pnpm/npm build and test, read-only tools). Everything else keeps the normal permissions. Same level of guarantee as the batch guard: it stops mistakes and realistic variants, not a determined adversary |
+| Status line | `[THANOS IS WORKING]` in white on Thanos purple at the start of the line while the mission is attached to the session (amber `[THANOS PAUSED]`, green `[THANOS DONE]`); plain text with `NO_COLOR`; ignored when the pointer is 12 h old |
+
+The first hook that sees `ms-workspace thanos start|resume` is what ties the mission to the session, so the hooks must be installed (plugin or `/dynamia:setup`). The plan-usage and sign-in expiry of a long run are the user's to watch.
+
 ## Guardrails
 
 - **Permissions are narrow on purpose.** `allow` covers read-only and local subcommands (`status`, `log`, `usage`, `plan`, `test`, `integrate`, `batch new`, ...). `undo`, `env`, `setup-hooks`, `docker clean`, `ps kill`, `notify` and `http run|bench` are in `ask`, so Claude Code always prompts before anything is undone or run from configuration. `ship` and `clean` are in `allow` on purpose: the guard hook decides, so there is one prompt only when it matters (below). Running `/dynamia:setup` on an older install moves them out of `ask` (an `ask` rule would beat the `allow` one). `setup-hooks` replaces an older broad `Bash(ms-workspace:*)` rule.

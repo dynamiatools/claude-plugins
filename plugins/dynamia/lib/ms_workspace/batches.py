@@ -41,8 +41,16 @@ def branch_kind(name: str, kind: str = "") -> str:
 
 
 def int_branch(ws: Workspace, batch: str, repo: str) -> str:
-    """The integration branch of a batch in a repo: whatever its worktree has checked out (feat/<name> for new batches,
-    int/<name> for the ones created before branches were named by type)."""
+    """The integration branch of a batch in a repo: the name recorded in <batch>/BRANCH when the batch was created, else
+    whatever its worktree has checked out (batches made before the file existed: <type>/<name> or int/<name>). The file
+    matters because a worktree may sit on a task branch for a while (THANOS works that way)."""
+    recorded = ws.batch_dir / batch / "BRANCH"
+    try:
+        name = recorded.read_text().strip()
+    except OSError:
+        name = ""
+    if name:
+        return name
     wt = ws.batch_dir / batch / repo
     return (git_out(wt, "branch", "--show-current") if wt.is_dir() else "") or f"int/{batch}"
 
@@ -55,7 +63,7 @@ def agent_branches(ws: Workspace, batch: str, repo: str) -> list[str]:
 def unintegrated(ws: Workspace, batch: str, repo: str) -> list[str]:
     """Agent branches of the batch whose commits are not part of the integration branch yet."""
     wt = ws.batch_dir / batch / repo
-    return [b for b in agent_branches(ws, batch, repo) if not git_ok(wt, "merge-base", "--is-ancestor", b, "HEAD")]
+    return [b for b in agent_branches(ws, batch, repo) if not git_ok(wt, "merge-base", "--is-ancestor", b, int_branch(ws, batch, repo))]
 
 
 # ------------------------------------------------------------ environment files
@@ -192,6 +200,7 @@ def cmd_batch(ws: Workspace, args: list[str]) -> int:
         else:
             lines.append(f"- [ ] {r}: ")
     (directory / "TASKS.md").write_text("\n".join(lines) + "\n")
+    (directory / "BRANCH").write_text(branch + "\n")
     print(f"Batch ready: {directory}")
     return 0
 
@@ -292,6 +301,8 @@ def cmd_integrate(ws: Workspace, args: list[str]) -> int:
         wt = ws.batch_dir / batch / r
         if not dry and git_out(wt, "status", "--porcelain"):
             die(f"{r}: {int_branch(ws, batch, r)} worktree has uncommitted changes")
+        if git_out(wt, "branch", "--show-current") != int_branch(ws, batch, r):
+            die(f"{r}: the worktree is on '{git_out(wt, 'branch', '--show-current')}', not on {int_branch(ws, batch, r)}; switch back first")
         branches = git_out(wt, "for-each-ref", "--format=%(refname:short)", f"refs/heads/agent/{batch}/").splitlines()
         for br in branches:
             if git_ok(wt, "merge-base", "--is-ancestor", br, "HEAD"):
@@ -448,6 +459,8 @@ def _ship(ws: Workspace, args: list[str]) -> int:
         wt, base = place[r][0], ws.base(r)
         if git_out(wt, "status", "--porcelain"):
             die(f"{r}: uncommitted changes in {place[r][1]}")
+        if git_out(wt, "branch", "--show-current") != place[r][1]:
+            die(f"{r}: the worktree is on '{git_out(wt, 'branch', '--show-current')}', not on {place[r][1]}; switch back first")
         pending = [] if plain else unintegrated(ws, batch, r)
         if pending:
             die(f"{r}: agent branches not integrated into {place[r][1]}: {', '.join(pending)}; "
@@ -573,9 +586,10 @@ def _merged(ws: Workspace, batch: str, repo: str, fetch: bool = False) -> bool:
     if unintegrated(ws, batch, repo):
         return False
     ref = base_ref(wt, base)
-    if git_ok(wt, "merge-base", "--is-ancestor", "HEAD", ref):
+    ib = int_branch(ws, batch, repo)
+    if git_ok(wt, "merge-base", "--is-ancestor", ib, ref):
         return True
-    merged = git(wt, "merge-tree", "--write-tree", ref, "HEAD")
+    merged = git(wt, "merge-tree", "--write-tree", ref, ib)
     return merged.returncode == 0 and merged.stdout.strip().splitlines()[0] == git_out(wt, "rev-parse", f"{ref}^{{tree}}")
 
 
@@ -630,7 +644,13 @@ def cmd_clean(ws: Workspace, args: list[str]) -> int:
         print(f"  cleaned {r}")
     from .memory import drop_batch_handoffs
     drop_batch_handoffs(ws, batch)
-    (ws.batch_dir / batch / "TASKS.md").unlink(missing_ok=True)
+    for name in ("TASKS.md", "BRANCH", "THANOS.md", ".thanos.json"):
+        (ws.batch_dir / batch / name).unlink(missing_ok=True)
+    try:
+        from .thanos import drop_pointers
+        drop_pointers(str(ws.batch_dir / batch))
+    except Exception:
+        pass   # the pointers are only a cache for the hooks and the status line
     # Only empty directories (such as .agents/<task>) are left; remove bottom-up.
     for p in sorted((ws.batch_dir / batch).rglob("*"), key=lambda x: len(x.parts), reverse=True):
         if p.is_dir() and not any(p.iterdir()):

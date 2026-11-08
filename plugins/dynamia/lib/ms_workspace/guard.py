@@ -260,6 +260,36 @@ def _context(root) -> Ctx | None:
     return Ctx(branch, protected)
 
 
+THANOS_START = re.compile(r"\bms-workspace\s+thanos\s+(start|resume)\b")
+
+
+def _thanos_step(command: str, sid: str) -> int | None:
+    """During a THANOS mission the strict profile decides: block, approve without a prompt, or (None) leave it to the rest of the guard.
+    It also tells the mission which session is starting it, because only a hook knows the session id."""
+    try:
+        from .thanos import bind_pending, session_mission
+        if THANOS_START.search(command):
+            bind_pending(sid)
+        m = session_mission(sid)
+        if not m:
+            return None
+        from .thanos_guard import verdict
+        kind, why = verdict(command, m)
+    except Exception:
+        return None   # fail open here: the normal guard still applies
+    if kind == "block":
+        from pathlib import Path
+        _log(Path(m["root"]), "blocked", f"{command}  [thanos: {why}]")
+        print(f"THANOS blocked: {why}. Do not look for a way around it: record it with ms-workspace thanos block \"<what and why>\", "
+              "park that task ([!] in THANOS.md) and continue with another one.", file=sys.stderr)
+        return 2
+    if kind == "allow":
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                                 "permissionDecisionReason": "THANOS: known-safe command inside the batch"}}))
+        return 0
+    return None
+
+
 def cmd_guard() -> int:
     try:
         payload = json.loads(sys.stdin.read())
@@ -272,6 +302,9 @@ def cmd_guard() -> int:
     command = strip_heredocs(command)
     if cwd and os.path.isdir(cwd):
         os.chdir(cwd)
+    decided = _thanos_step(command, payload.get("session_id") or "")
+    if decided is not None:
+        return decided
     root = find_workspace_root()
     if root is None:
         return 0
