@@ -3,7 +3,7 @@
     ms-workspace open <batch> [--ide code|idea] [--repo R] [--agent TASK] [--dry-run]
 
 What gets opened (the real worktree paths under working-trees/<batch>/):
-    default        the batch's int/<batch> worktrees, one per repo
+    default        the batch's worktrees, one per repo
     --agent TASK   the worktrees of that agent (working-trees/<batch>/.agents/<TASK>/<repo>)
     --repo R       only that repo (repeatable)
 

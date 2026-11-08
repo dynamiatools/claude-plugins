@@ -9,12 +9,12 @@ allowed-tools: Bash(ms-workspace usage:*) Bash(ms-workspace plan:*)
 
 The only step that touches remotes. It never targets release branches and never force-pushes.
 
-It ships two things: a **batch** (`int/<batch>` worktrees) or a **plain branch** (`--branch`: the task branch checked out in a repo's own checkout, which `/dynamia:batch` offers for small single-repo tasks). Everything below applies to both; for a plain branch replace `<batch>` with `--branch [<repo>]` in every command (the repo defaults to the one you are in; it must be on a task branch, not the base branch, with a clean tree). Ship merges a moved base into that branch in the checkout, and leaves the branch there afterwards.
+It ships two things: a **batch** (the batch's worktrees and their `<type>/<batch>` branch) or a **plain branch** (`--branch`: the task branch checked out in a repo's own checkout, which `/dynamia:batch` offers for small single-repo tasks). Everything below applies to both; for a plain branch replace `<batch>` with `--branch [<repo>]` in every command (the repo defaults to the one you are in; it must be on a task branch, not the base branch, with a clean tree). Ship merges a moved base into that branch in the checkout, and leaves the branch there afterwards.
 
-It works from the workspace root or from inside the batch worktree. In a batch worktree the guard blocks `git push`, `gh pr create` and `ship --skip-gate` typed by hand, so always go through `ms-workspace ship`.
+It works from the workspace root or from inside the batch worktree. In a batch worktree the guard blocks pushes to the base branch, force pushes, `gh pr create` and `ship --skip-gate` typed by hand, so always go through `ms-workspace ship` to publish. (Pushing the batch's own branch for backup, `git push -u origin <branch>`, is allowed with a confirmation; it is not a ship.)
 
 **What the user's words mean**
-- "open a PR", "abre un PR", "crea el pull request" -> `--pr`: every repo gets `int/<batch>` pushed and a PR to its base branch, whatever its `push` setting.
+- "open a PR", "abre un PR", "crea el pull request" -> `--pr`: every repo gets the batch branch pushed and a PR to its base branch, whatever its `push` setting.
 - "ship", "publish", "push it", "sube esto" -> no `--pr`: each repo uses its configured `push` mode (`direct` pushes to the base branch, `pr` opens a PR).
 - If a repo has `push = "ask"`, always ask (PR or direct push) before step 2 and pass the answer as `--pr` or `--direct`; `plan` and `ship` refuse to run without one.
 - If it is unclear, do not ask: use the configured mode. The ship permission prompt is the only confirmation.

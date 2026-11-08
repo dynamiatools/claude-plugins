@@ -138,6 +138,7 @@
       "Bash(ms-workspace test:*)",
       "Bash(ms-workspace integrate:*)",
       "Bash(ms-workspace batch new:*)",
+      "Bash(ms-workspace branch new:*)",
       "Bash(ms-workspace agent new:*)",
       "Bash(ms-workspace budget:*)",
       "Bash(ms-workspace http list:*)",
