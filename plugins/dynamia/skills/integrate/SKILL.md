@@ -7,7 +7,7 @@ allowed-tools: Bash(ms-workspace usage:*) Bash(ms-workspace integrate:*) Bash(ms
 
 # dynamia:integrate
 
-Joins agent work into `int/<batch>` and validates it. Local only: nothing is pushed.
+Joins agent work into the batch branch (`<type>/<batch>`) and validates it. Local only: nothing is pushed.
 
 ## Steps
 

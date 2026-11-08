@@ -1,13 +1,16 @@
 """PreToolUse hook: stop agents inside batch worktrees from publishing.
 
-It must fail closed: inside a batch the decision never depends on parsing workspace.toml, and any internal
-error blocks a command that looks risky instead of letting it through."""
+Three outcomes: allow, ask the user (pushing the batch's own work branch to origin, so work in progress is backed up
+or shared without touching the base branch) and block (everything that publishes or destroys shared state).
+It must fail closed: inside a batch a block never depends on parsing workspace.toml, "ask" is only reached for a plain
+push of a non-protected work branch, and any internal error blocks a command that looks risky."""
 from __future__ import annotations
 
 import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 
 from .core import batch_dirname, find_workspace_root
@@ -19,13 +22,32 @@ GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec
 PUBLISH_GH = {("pr", "create"), ("pr", "merge"), ("pr", "ready"), ("pr", "close"), ("release", "create"),
               ("repo", "create"), ("repo", "delete"), ("workflow", "run")}
 LOOSE = re.compile(r"\bpush\b|\bgh\s+(pr|release|repo|api|workflow)\b|\bms-workspace\s+(clean|env|setup-hooks|undo|ps|docker)\b|\bsend-pack\b")
+PUSH_VALUE_OPTS = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}
+PUSH_BLOCK_OPTS = {"--force", "--delete", "--mirror", "--all", "--branches", "--prune", "--tags", "--atomic-all"}
+ALWAYS_PROTECTED = {"main", "master", "qa", "prod", "production", "develop", "development", "staging", "next", "trunk", "HEAD"}
+WORK_PREFIXES = ("int/", "agent/")   # integration branches of batches created before type-named branches
 MESSAGE = ("Blocked: agents in a batch worktree must not push, open or merge PRs by hand, or run 'ms-workspace clean --force|undo|promote|setup-hooks|env --trust' "
-           "or 'ship --skip-gate'. Commit locally. When the user asks to publish or open a PR, use the /dynamia:ship skill: "
+           "or 'ship --skip-gate'. Commit locally. To back up or share work in progress, push the batch's own branch: "
+           "'git push -u origin <branch>' (the user is asked to confirm; no force, never the base branch). "
+           "When the user asks to publish or open a PR, use the /dynamia:ship skill: "
            "'ms-workspace ship <batch> [--pr] --yes' after showing the plan and getting their confirmation.")
 
 
+HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1([^\n]*)\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
+SHELL_WORD = re.compile(r"(^|[\s;&|(/])(ba|z|da|k)?sh\b|\beval\b")
+
+
+def strip_heredocs(command: str) -> str:
+    """Drop the text of heredocs fed to a program that only reads it (python, cat, tee...): it is data, not commands, and
+    words like 'git push' inside a script or a doc must not trip the guard. A heredoc fed to a shell is kept."""
+    def drop(m: re.Match) -> str:
+        head = command[command.rfind("\n", 0, m.start()) + 1:m.start()]
+        return m.group(0) if SHELL_WORD.search(head) else f"<<{m.group(1)}{m.group(2)}{m.group(1)}{m.group(3)}\n{m.group(2)}"
+    return HEREDOC.sub(drop, command)
+
+
 def _segments(command: str) -> list[list[str]]:
-    lex = shlex.shlex(command, posix=True, punctuation_chars=";&|(){}")
+    lex = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=";&|(){}")   # a newline ends a command like ";" does
     lex.whitespace_split = True
     lex.commenters = ""
     tokens = list(lex)
@@ -67,8 +89,55 @@ def _git_subcommand(args: list[str]) -> tuple[str, list[str]]:
     return "", []
 
 
-def analyze(command: str, depth: int = 0) -> str | None:
-    """Return a reason when the command would publish or change shared state, else None."""
+class Ctx:
+    """What a push decision may need from the worktree: its current branch and the branches nobody may push to by hand."""
+    def __init__(self, branch: str = "", protected: set[str] | None = None):
+        self.branch = branch
+        self.protected = ALWAYS_PROTECTED | (protected or set())
+
+
+def push_verdict(args: list[str], ctx: Ctx | None, trust_head: bool = True) -> str:
+    """'ask' for a plain, non-forced push of a work branch to origin; '' (a block) for anything else."""
+    if ctx is None:
+        return ""
+    positional, it = [], iter(args)
+    for a in it:
+        if a in PUSH_VALUE_OPTS:
+            next(it, None)
+        elif a.startswith("--"):
+            if a.split("=")[0] in PUSH_BLOCK_OPTS or a.startswith("--force") or a.startswith("--delete") or a.startswith("--repo=") or a.startswith("--receive-pack="):
+                return ""
+        elif a.startswith("-") and len(a) > 1:
+            if set(a[1:]) & {"f", "d"}:
+                return ""
+        else:
+            positional.append(a)
+    if len(positional) < 2:
+        return ""   # a bare 'git push' or 'git push origin' relies on push.default: name the branch
+    remote, refspecs = positional[0], positional[1:]
+    if not remote or remote.startswith(("-", "+")) or "/" in remote or ":" in remote:
+        return ""   # only a named remote (origin), never a URL or a path
+    for spec in refspecs:
+        if spec.startswith("+"):
+            return ""
+        src, colon, dst = spec.partition(":")
+        if colon and not src:
+            return ""   # ':branch' deletes it
+        dst = dst if colon else src
+        if dst.startswith("refs/heads/"):
+            dst = dst[len("refs/heads/"):]
+        if dst == "HEAD" and not colon:
+            dst = ctx.branch if trust_head else ""
+        if not dst or dst.startswith("refs/") or dst in ctx.protected or dst.startswith("release/"):
+            return ""
+        if dst != ctx.branch and not dst.startswith(WORK_PREFIXES):
+            return ""
+    return "ask"
+
+
+def analyze(command: str, depth: int = 0, asks: list[str] | None = None, ctx: Ctx | None = None) -> str | None:
+    """Return a reason when the command would publish or change shared state, else None.
+    A push that is only worth confirming adds its description to `asks` instead."""
     try:
         segs = _segments(command)
     except ValueError:
@@ -81,15 +150,20 @@ def analyze(command: str, depth: int = 0) -> str | None:
         if prog in SHELLS and "-c" in args and depth < 3:
             idx = args.index("-c")
             if idx + 1 < len(args):
-                inner = analyze(args[idx + 1], depth + 1)
+                inner = analyze(args[idx + 1], depth + 1, asks, ctx)
                 if inner:
                     return inner
         elif prog == "eval" and depth < 3:
-            inner = analyze(" ".join(args), depth + 1)
+            inner = analyze(" ".join(args), depth + 1, asks, ctx)
             if inner:
                 return inner
         elif prog == "git":
             sub, rest = _git_subcommand(args)
+            if sub == "push" and asks is not None:
+                before = args[:len(args) - len(rest) - 1]   # options given before 'push': -C <dir> and friends move HEAD elsewhere
+                if push_verdict(rest, ctx, trust_head=not any(a.startswith(("-C", "--git-dir", "--work-tree")) for a in before)) == "ask":
+                    asks.append("git push " + " ".join(rest))
+                    continue
             if sub in ("push", "send-pack") or (sub == "subtree" and rest[:1] == ["push"]):
                 return f"git {sub}"
         elif prog == "gh":
@@ -108,12 +182,82 @@ def analyze(command: str, depth: int = 0) -> str | None:
     return None
 
 
-def _log_blocked(root, command: str) -> None:
+def confirm_reasons(root, command: str) -> list[str]:
+    """Commands that need the user's yes wherever they run: a ship that pushes straight to a base branch, and a forced clean.
+    A ship that only opens PRs (`--pr`, or every repo of the batch has push = "pr") and a clean of a merged batch go through:
+    the first is reversible, the second refuses by itself unless the work is already in the base branch."""
+    out: list[str] = []
+    try:
+        segs = _segments(command)
+    except ValueError:
+        return out
+    ws = None
+    for seg in segs:
+        seg = _strip(seg)
+        if not seg or os.path.basename(seg[0]) != "ms-workspace":
+            continue
+        args = seg[1:]
+        words = [a for a in args if not a.startswith("-")]
+        sub = words[0] if words else ""
+        if sub == "clean" and "--force" in args:
+            out.append("clean --force discards a batch that is not merged")
+        elif sub == "ship" and "--yes" in args:
+            if "--pr" in args and "--direct" not in args:
+                continue
+            try:
+                from .core import Workspace, batch_repos
+                ws = ws or Workspace(root)
+                if "--direct" in args:
+                    raise ValueError("direct")
+                if "--branch" in args:
+                    repos = [words[1]] if len(words) > 1 else []
+                else:
+                    repos = batch_repos(ws, words[1]) if len(words) > 1 else []
+                if not repos or any((ws.repo_cfg(r).get("push") or "direct") != "pr" for r in repos):
+                    raise ValueError("direct")
+            except Exception:
+                out.append("ship pushes straight to the base branch (use --pr to open a pull request instead)")
+    return out
+
+
+def _ask(root, command: str, reason: str) -> None:
+    _log(root, "ask", command)
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask", "permissionDecisionReason": reason}}))
+
+
+def _log(root, outcome: str, command: str) -> None:
     try:
         from .core import Workspace
-        Workspace(root).log("guard", "blocked", "", "", command)
+        Workspace(root).log("guard", outcome, "", "", command)
     except Exception:
-        pass  # logging is best effort; the block does not depend on the config being readable
+        pass  # logging is best effort; the decision does not depend on the config being readable
+
+
+def _log_blocked(root, command: str) -> None:
+    _log(root, "blocked", command)
+
+
+def _context(root) -> Ctx | None:
+    """Current branch of the worktree the command runs in, and the base/release branches of the workspace.
+    None (so a push stays blocked) outside a batch worktree or when git cannot say."""
+    cwd = os.getcwd()
+    if not any((cwd + "/").startswith(str(root / n) + "/") for n in {".batches", batch_dirname(root)}):
+        return None
+    try:
+        out = subprocess.run(["git", "branch", "--show-current"], cwd=cwd, capture_output=True, text=True, timeout=3)
+        branch = out.stdout.strip() if out.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return None
+    protected: set[str] = set()
+    try:
+        from .core import Workspace
+        ws = Workspace(root)
+        for r in ws.repo_names():
+            protected.add(ws.base(r))
+            protected.update(ws.repo_cfg(r).get("release") or [])
+    except Exception:
+        pass   # the built-in list of protected names still applies
+    return Ctx(branch, protected)
 
 
 def cmd_guard() -> int:
@@ -125,21 +269,29 @@ def cmd_guard() -> int:
         return 0
     if not isinstance(command, str) or not command:
         return 0
+    command = strip_heredocs(command)
     if cwd and os.path.isdir(cwd):
         os.chdir(cwd)
     root = find_workspace_root()
     if root is None:
         return 0
     names = {".batches", batch_dirname(root)}
+    confirm = confirm_reasons(root, command)
     # Inside a batch, or reaching into one from elsewhere (`cd .batches/b/lib && git push`).
     if not (any((os.getcwd() + "/").startswith(str(root / n) + "/") for n in names) or any(n in command for n in names)):
+        if confirm:
+            _ask(root, command, "; ".join(confirm) + ".")
         return 0
+    asks: list[str] = []
     try:
-        reason = analyze(command)
+        reason = analyze(command, asks=asks, ctx=_context(root))
     except Exception:
-        reason = "guard error" if LOOSE.search(command) else None  # fail closed on anything that looks risky
+        reason, asks = ("guard error" if LOOSE.search(command) else None), []  # fail closed on anything that looks risky
     if reason:
         _log_blocked(root, f"{command}  [{reason}]")
         print(MESSAGE, file=sys.stderr)
         return 2
+    if asks or confirm:
+        why = ["Push of a batch work branch to origin (" + "; ".join(asks) + "). Not the base branch, no force. Allow it to back up or share work in progress."] if asks else []
+        _ask(root, command, " ".join(why + [c + "." for c in confirm]))
     return 0

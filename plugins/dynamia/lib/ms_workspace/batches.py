@@ -27,15 +27,35 @@ def valid_name(kind: str, name: str) -> str:
     return name
 
 
+KINDS = ("feat", "fix", "chore", "refactor", "docs", "test", "perf")
+
+
+def branch_kind(name: str, kind: str = "") -> str:
+    """Prefix of a work branch: the requested kind, else the one a name starting with 'fix-', 'docs-'... hints at, else 'feat'."""
+    if kind:
+        if kind not in KINDS:
+            die(f"invalid type '{kind}': use one of {', '.join(KINDS)}")
+        return kind
+    head = name.split("-", 1)[0].lower()
+    return head if head in KINDS and "-" in name else "feat"
+
+
+def int_branch(ws: Workspace, batch: str, repo: str) -> str:
+    """The integration branch of a batch in a repo: whatever its worktree has checked out (feat/<name> for new batches,
+    int/<name> for the ones created before branches were named by type)."""
+    wt = ws.batch_dir / batch / repo
+    return (git_out(wt, "branch", "--show-current") if wt.is_dir() else "") or f"int/{batch}"
+
+
 def agent_branches(ws: Workspace, batch: str, repo: str) -> list[str]:
     wt = ws.batch_dir / batch / repo
     return [b for b in git_out(wt, "for-each-ref", "--format=%(refname:short)", f"refs/heads/agent/{batch}/").splitlines() if b]
 
 
 def unintegrated(ws: Workspace, batch: str, repo: str) -> list[str]:
-    """Agent branches of the batch whose commits are not part of int/<batch> yet."""
+    """Agent branches of the batch whose commits are not part of the integration branch yet."""
     wt = ws.batch_dir / batch / repo
-    return [b for b in agent_branches(ws, batch, repo) if not git_ok(wt, "merge-base", "--is-ancestor", b, f"int/{batch}")]
+    return [b for b in agent_branches(ws, batch, repo) if not git_ok(wt, "merge-base", "--is-ancestor", b, "HEAD")]
 
 
 # ------------------------------------------------------------ environment files
@@ -132,8 +152,14 @@ def _rollback(ws: Workspace, created: list[tuple[str, Path, str]], directory: Pa
 
 def cmd_batch(ws: Workspace, args: list[str]) -> int:
     if not args or args[0] != "new" or len(args) < 2:
-        die("usage: batch new <name> [repo...]")
-    name, repos = valid_name("batch", args[1]), args[2:] or ws.repo_names()
+        die("usage: batch new <name> [--type feat|fix|chore|refactor|docs|test|perf] [repo...]")
+    rest, kind = args[2:], ""
+    if "--type" in rest:
+        i = rest.index("--type")
+        kind = rest[i + 1] if i + 1 < len(rest) else ""
+        rest = rest[:i] + rest[i + 2:]
+    name, repos = valid_name("batch", args[1]), rest or ws.repo_names()
+    branch = f"{branch_kind(name, kind)}/{name}"
     directory = ws.batch_dir / name
     if directory.exists():
         die(f"batch '{name}' already exists at {directory}")
@@ -148,13 +174,13 @@ def cmd_batch(ws: Workspace, args: list[str]) -> int:
             if not git_ok(src, "fetch", "origin", base, "--quiet"):
                 eprint(f"warn: could not fetch {r}/{base} (using local ref)")
             start = f"origin/{base}" if git_ok(src, "rev-parse", "--verify", "--quiet", f"origin/{base}") else base
-            res = git(src, "worktree", "add", "--no-track", "-b", f"int/{name}", str(directory / r), start)
+            res = git(src, "worktree", "add", "--no-track", "-b", branch, str(directory / r), start)
             if res.returncode != 0:
                 ws.log("batch.new", "error", r, name, "worktree add failed")
-                die(f"could not create worktree for {r} (branch int/{name} may exist): {res.stderr.strip()}")
-            created.append((r, directory / r, f"int/{name}"))
-            ws.log("batch.new", "ok", r, name, f"int/{name} from {start}")
-            print(f"  {r} -> {directory / r} (int/{name} from {start})")
+                die(f"could not create worktree for {r} (branch {branch} may exist): {res.stderr.strip()}")
+            created.append((r, directory / r, branch))
+            ws.log("batch.new", "ok", r, name, f"{branch} from {start}")
+            print(f"  {r} -> {directory / r} ({branch} from {start})")
             copy_env(ws, r, directory / r)
     except MsError:
         _rollback(ws, created, directory)
@@ -167,6 +193,39 @@ def cmd_batch(ws: Workspace, args: list[str]) -> int:
             lines.append(f"- [ ] {r}: ")
     (directory / "TASKS.md").write_text("\n".join(lines) + "\n")
     print(f"Batch ready: {directory}")
+    return 0
+
+
+def cmd_branch(ws: Workspace, args: list[str]) -> int:
+    """branch new <name> [repo] [--type T]: a plain local branch in the repo's own checkout, from the base branch (no worktree)."""
+    if len(args) < 2 or args[0] != "new":
+        die("usage: branch new <name> [repo] [--type feat|fix|chore|refactor|docs|test|perf]")
+    rest, kind = args[2:], ""
+    if "--type" in rest:
+        i = rest.index("--type")
+        kind = rest[i + 1] if i + 1 < len(rest) else ""
+        rest = rest[:i] + rest[i + 2:]
+    name = valid_name("branch", args[1])
+    repo = rest[0] if rest else ""
+    if not repo:
+        top = toplevel()
+        repo = next((r for r in ws.repo_names() if ws.repo_dir(r).resolve() == top.resolve()), "")
+    if repo not in ws.repo_names():
+        die(f"branch new: cannot tell which repo to use ('{repo}'); run it inside the repo or name it: branch new {name} <repo>")
+    src, base = ws.repo_dir(repo), ws.base(repo)
+    branch = f"{branch_kind(name, kind)}/{name}"
+    if git_out(src, "status", "--porcelain"):
+        die(f"{repo}: the checkout has uncommitted changes; commit or stash them first, or open a worktree with 'batch new' instead")
+    if git_ok(src, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"):
+        die(f"{repo}: branch {branch} already exists; switch to it with 'git switch {branch}'")
+    if not git_ok(src, "fetch", "origin", base, "--quiet"):
+        eprint(f"warn: could not fetch {repo}/{base} (using local ref)")
+    start = f"origin/{base}" if git_ok(src, "rev-parse", "--verify", "--quiet", f"origin/{base}") else base
+    res = git(src, "switch", "--no-track", "-c", branch, start)
+    if res.returncode != 0:
+        die(f"{repo}: could not create {branch} from {start}: {res.stderr.strip()}")
+    ws.log("branch.new", "ok", repo, name, f"{branch} from {start}")
+    print(f"  {repo}: on {branch} (from {start}). Commit locally; publish with: ms-workspace ship --branch {repo}")
     return 0
 
 
@@ -183,7 +242,7 @@ def cmd_agent(ws: Workspace, args: list[str]) -> int:
             wt = ws.batch_dir / batch / ".agents" / task / r
             if not main_wt.is_dir():
                 die(f"repo '{r}' is not part of batch '{batch}'")
-            res = git(main_wt, "worktree", "add", "--no-track", "-b", f"agent/{batch}/{task}", str(wt), f"int/{batch}")
+            res = git(main_wt, "worktree", "add", "--no-track", "-b", f"agent/{batch}/{task}", str(wt), int_branch(ws, batch, r))
             if res.returncode != 0:
                 die(f"could not create agent worktree for {r} (branch agent/{batch}/{task} may exist): {res.stderr.strip()}")
             created.append((r, wt, f"agent/{batch}/{task}"))
@@ -232,7 +291,7 @@ def cmd_integrate(ws: Workspace, args: list[str]) -> int:
     for r in topo(ws, batch_repos(ws, batch)):
         wt = ws.batch_dir / batch / r
         if not dry and git_out(wt, "status", "--porcelain"):
-            die(f"{r}: int/{batch} worktree has uncommitted changes")
+            die(f"{r}: {int_branch(ws, batch, r)} worktree has uncommitted changes")
         branches = git_out(wt, "for-each-ref", "--format=%(refname:short)", f"refs/heads/agent/{batch}/").splitlines()
         for br in branches:
             if git_ok(wt, "merge-base", "--is-ancestor", br, "HEAD"):
@@ -255,7 +314,7 @@ def cmd_integrate(ws: Workspace, args: list[str]) -> int:
                 ws.log("integrate", "conflict", r, batch, f"{br}: {files}")
                 conflict = True
     if conflict:
-        eprint(f"Resolve the conflicts (rebase the agent branch on int/{batch}), then run again.")
+        eprint(f"Resolve the conflicts (rebase the agent branch on the integration branch of '{batch}'), then run again.")
         return 1
     if not dry:
         print(f"Integrated. Next: ms-workspace test t1 {batch}")
@@ -353,7 +412,7 @@ def _ship(ws: Workspace, args: list[str]) -> int:
         args = [batch] + args   # from here on args[0] stands for the batch, as in a normal ship
     else:
         batch = need_batch(ws, args[0])
-        place = {r: (ws.batch_dir / batch / r, f"int/{batch}") for r in batch_repos(ws, batch)}
+        place = {r: (ws.batch_dir / batch / r, int_branch(ws, batch, r)) for r in batch_repos(ws, batch)}
     yes = skip_e2e = skip_smoke = skip_gate = force_pr = force_direct = False
     pr_title = pr_body = ""
     rest = iter(args[1:])
@@ -391,7 +450,7 @@ def _ship(ws: Workspace, args: list[str]) -> int:
             die(f"{r}: uncommitted changes in {place[r][1]}")
         pending = [] if plain else unintegrated(ws, batch, r)
         if pending:
-            die(f"{r}: agent branches not integrated into int/{batch}: {', '.join(pending)}; "
+            die(f"{r}: agent branches not integrated into {place[r][1]}: {', '.join(pending)}; "
                 f"run 'ms-workspace integrate {batch}' first (or 'clean --force' to discard them)")
         if base in (ws.repo_cfg(r).get("release") or []):
             die(f"{r}: base '{base}' is a release branch; ship never targets those; use 'ms-workspace promote' to move a base branch to it")
@@ -505,7 +564,7 @@ def _ship(ws: Workspace, args: list[str]) -> int:
 
 # ------------------------------------------------------------------------ clean
 def _merged(ws: Workspace, batch: str, repo: str, fetch: bool = False) -> bool:
-    """The work of int/<batch> is in the base branch as the remote has it, and every agent branch is part of int/<batch>.
+    """The work of the integration branch is in the base branch as the remote has it, and every agent branch is part of it.
     Plain, rebase and squash merges all count: a merge of HEAD into the base that changes nothing means its content is already there."""
     wt = ws.batch_dir / batch / repo
     base = ws.base(repo)
@@ -539,9 +598,9 @@ def cmd_clean(ws: Workspace, args: list[str]) -> int:
         for r in repos:
             pending = unintegrated(ws, batch, r)
             if pending:
-                die(f"{r}: agent branches not integrated into int/{batch}: {', '.join(pending)} (integrate them, or use --force to discard)")
+                die(f"{r}: agent branches not integrated into {int_branch(ws, batch, r)}: {', '.join(pending)} (integrate them, or use --force to discard)")
             if not _merged(ws, batch, r, fetch=True):
-                die(f"{r}: int/{batch} is not in origin/{ws.base(r)} yet (PR still open or not merged, or origin unreachable). "
+                die(f"{r}: {int_branch(ws, batch, r)} is not in origin/{ws.base(r)} yet (PR still open or not merged, or origin unreachable). "
                     f"Nothing was removed; use --force to discard the batch anyway")
     from .procs import procs_in_dir
     running = procs_in_dir(ws.batch_dir / batch)
@@ -553,6 +612,7 @@ def cmd_clean(ws: Workspace, args: list[str]) -> int:
     flags = ["--force"] if force else []
     for r in repos:
         main_wt = ws.batch_dir / batch / r
+        ibranch = int_branch(ws, batch, r)   # read it before the worktree goes away
         for wt in sorted((ws.batch_dir / batch / ".agents").glob(f"*/{r}")):
             res = git(main_wt, "worktree", "remove", *flags, str(wt))
             if res.returncode != 0:
@@ -560,8 +620,11 @@ def cmd_clean(ws: Workspace, args: list[str]) -> int:
         res = git(main_wt, "worktree", "remove", *flags, str(main_wt))
         if res.returncode != 0:
             die(f"{r}: could not remove {main_wt}: {res.stderr.strip()}")
-        refs = git_out(ws.repo_dir(r), "for-each-ref", "--format=%(refname:short)", f"refs/heads/agent/{batch}/", f"refs/heads/int/{batch}")
-        for b in refs.splitlines():
+        refs = git_out(ws.repo_dir(r), "for-each-ref", "--format=%(refname:short)", f"refs/heads/agent/{batch}/")
+        own = ibranch if ibranch.endswith(f"/{batch}") else ""   # never delete a branch that is not this batch's
+        for b in [*refs.splitlines(), own]:
+            if not b:
+                continue
             git(ws.repo_dir(r), "branch", "-D", b)
         ws.log("clean", "ok", r, batch, "")
         print(f"  cleaned {r}")

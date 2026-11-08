@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .core import die
 
+LEGACY_ASK = ["Bash(ms-workspace ship:*)", "Bash(ms-workspace clean:*)"]  # now allowed; the guard hook asks only when it matters
 LEGACY_ALLOW = ["Bash(ms-workspace:*)"]  # earlier, too broad rule: it auto-approved ship, clean and env
 SOURCE = Path(__file__).resolve().parents[2] / "settings" / "hooks.example.json"
 
@@ -66,6 +67,11 @@ def merge(settings: dict, src: dict) -> list[str]:
                 if old in rules:
                     rules.remove(old)
                     report.append(f"removed  permission {old} (too broad; replaced by the narrower rules below)")
+        else:
+            for old in LEGACY_ASK:
+                if old in rules:
+                    rules.remove(old)
+                    report.append(f"removed  ask {old} (the guard hook now asks only for a direct push to base or clean --force)")
         for rule in src.get("permissions", {}).get(kind, []):
             if rule in rules:
                 report.append(f"present  {kind} {rule}")
@@ -123,7 +129,7 @@ def remove(settings: dict, src: dict) -> list[str]:
     perms = settings.get("permissions", {})
     for kind in ("allow", "ask"):
         rules = perms.get(kind, [])
-        for rule in src.get("permissions", {}).get(kind, []) + (LEGACY_ALLOW if kind == "allow" else []):
+        for rule in src.get("permissions", {}).get(kind, []) + (LEGACY_ALLOW if kind == "allow" else LEGACY_ASK):
             if rule in rules:
                 rules.remove(rule)
                 report.append(f"removed  {kind} {rule}")

@@ -61,7 +61,7 @@ release = []                 # branches that go to qa/production
 stacks = ["maven", "pnpm"]
 deps = []                    # repos this one depends on
 critical = []                # modules always tested in t1/t2 (money, security, ...)
-push = "direct"              # "direct" (push int/<batch> to base), "pr" (open a PR) or "ask" (the agent asks each time; ship needs --pr or --direct)
+push = "direct"              # "direct" (push the batch branch to base), "pr" (open a PR) or "ask" (the agent asks each time; ship needs --pr or --direct)
 # tasks = "github"           # overrides the workspace-wide tracking mode for this repo
 # env = ["SPRING_PROFILES_ACTIVE=test", "API_URL=http://localhost:8080"]   # NAME=value for this repo's test, e2e and setup commands (no secrets: this file is shared)
 # env_files = [".env.local"] # extra ignored files copied into every new worktree (plus .worktreeinclude)

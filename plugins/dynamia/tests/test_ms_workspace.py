@@ -136,11 +136,64 @@ class TestBatch(Base):
     def test_batch_new_creates_worktrees_branches_and_tasks(self):
         d = self.ws.batch("b1")
         for r in ("lib", "app"):
-            self.assertEqual(self.ws.git(d / r, "branch", "--show-current"), "int/b1")
+            self.assertEqual(self.ws.git(d / r, "branch", "--show-current"), "feat/b1")
         tasks = (d / "TASKS.md").read_text()
         self.assertIn("lib", tasks)
         self.assertIn("app", tasks)
         self.assertIn("batch.new", self.ws.log_lines())
+
+    def test_batch_branch_is_named_by_type(self):
+        for name, extra, want in (("login", [], "feat/login"), ("fix-login", [], "fix/fix-login"),
+                                  ("docs-readme", [], "docs/docs-readme"), ("cleanup", ["--type", "chore"], "chore/cleanup"),
+                                  ("fixture-data", [], "feat/fixture-data")):
+            with self.subTest(name=name):
+                r = self.ws.ms("batch", "new", name, *extra, "lib")
+                self.assertOk(r)
+                self.assertEqual(self.ws.git(self.ws.root / ".batches" / name / "lib", "branch", "--show-current"), want)
+        self.assertNotEqual(self.ws.ms("batch", "new", "x", "--type", "wip", "lib").returncode, 0)
+
+    def test_agent_integrate_ship_and_clean_follow_the_real_branch_name(self):
+        d = self.ws.batch("b1", "lib")
+        self.assertOk(self.ws.ms("agent", "new", "b1", "t1", "lib"))
+        a = d / ".agents" / "t1" / "lib"
+        self.ws.commit(a, "agent work", {"x.txt": "x\n"})
+        self.assertOk(self.ws.ms("integrate", "b1"))
+        self.assertTrue((d / "lib" / "x.txt").is_file())
+        self.assertIn("feat/b1 -> next", self.ws.ms("plan", "b1").stdout)
+        self.assertOk(self.ws.ms("ship", "b1", "--yes", "--skip-e2e"))
+        self.assertOk(self.ws.ms("clean", "b1"))
+        self.assertEqual(self.ws.git(self.ws.root / "lib", "branch", "--list", "feat/b1", "agent/b1/t1"), "")
+
+    def test_a_batch_made_with_the_old_int_name_still_works(self):
+        lib = self.ws.root / "lib"
+        d = self.ws.root / ".batches" / "old"
+        d.mkdir(parents=True)
+        self.ws.git(lib, "worktree", "add", "--no-track", "-b", "int/old", str(d / "lib"), "origin/next")
+        self.ws.commit(d / "lib", "old work", {"o.txt": "o\n"})
+        self.assertIn("int/old -> next", self.ws.ms("plan", "old").stdout)
+        self.assertOk(self.ws.ms("ship", "old", "--yes", "--skip-e2e"))
+        self.assertOk(self.ws.ms("clean", "old"))
+        self.assertEqual(self.ws.git(lib, "branch", "--list", "int/old"), "")
+
+    def test_clean_never_deletes_a_branch_that_is_not_the_batchs(self):
+        d = self.ws.batch("b1", "lib")
+        self.ws.git(self.ws.root / "lib", "branch", "keep")
+        self.ws.git(d / "lib", "checkout", "-q", "keep")   # the worktree moved to someone else's branch
+        self.assertOk(self.ws.ms("clean", "b1", "--force"))
+        self.assertIn("keep", self.ws.git(self.ws.root / "lib", "branch", "--list", "keep"))
+
+    def test_branch_new_makes_a_plain_branch_from_base(self):
+        lib = self.ws.root / "lib"
+        self.assertOk(self.ws.ms("branch", "new", "fix-typo", cwd=lib))
+        self.assertEqual(self.ws.git(lib, "branch", "--show-current"), "fix/fix-typo")
+        self.ws.git(lib, "switch", "-q", "next")
+        r = self.ws.ms("branch", "new", "fix-typo", "lib")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("already exists", r.stderr)
+        (lib / "a.txt").write_text("dirty\n")
+        r = self.ws.ms("branch", "new", "other", "lib")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("uncommitted", r.stderr)
 
     def test_batch_new_twice_fails(self):
         self.ws.batch("b1")
@@ -523,14 +576,14 @@ class TestClean(Base):
         self.assertOk(self.ws.ms("clean", "b1"))
         self.assertFalse(self.d.exists())
         branches = self.ws.git(self.ws.root / "lib", "branch", "--list")
-        self.assertNotIn("int/b1", branches)
+        self.assertNotIn("feat/b1", branches)
         self.assertNotIn("agent/b1/t1", branches)
         self.assertNotIn(".batches/b1", self.ws.git(self.ws.root / "lib", "worktree", "list"))
 
     def test_clean_accepts_a_squash_merge_on_origin(self):
         lib = self.ws.root / "lib"
         base = self.ws.git(lib, "rev-parse", "--abbrev-ref", "HEAD").strip()
-        self.ws.git(lib, "merge", "--squash", "int/b1")
+        self.ws.git(lib, "merge", "--squash", "feat/b1")
         self.ws.git(lib, "commit", "-m", "squashed")
         self.ws.git(lib, "push", "origin", base)
         self.assertOk(self.ws.ms("clean", "b1"))
@@ -539,7 +592,7 @@ class TestClean(Base):
     def test_force_discards_unmerged_work(self):
         self.assertOk(self.ws.ms("clean", "b1", "--force"))
         self.assertFalse(self.d.exists())
-        self.assertNotIn("int/b1", self.ws.git(self.ws.root / "lib", "branch", "--list"))
+        self.assertNotIn("feat/b1", self.ws.git(self.ws.root / "lib", "branch", "--list"))
 
     def test_no_batches(self):
         w = WS()
@@ -554,13 +607,95 @@ class TestGuard(Base):
 
     def test_blocks_publishing_commands_inside_a_batch(self):
         d = self.ws.batch("b1")
-        for cmd in ("git push origin int/b1", "git -C . push --force", "git push", "gh pr create --fill",
+        for cmd in ("git push origin next", "git -C . push --force", "git push", "gh pr create --fill",
                     "gh pr merge 3", "ms-workspace ship b1 --yes --skip-gate", "ms-workspace clean b1 --force", "ms-workspace promote lib --yes"):
             with self.subTest(cmd=cmd):
                 r = self.guard(cmd, d / "lib")
                 self.assertEqual(r.returncode, 2, cmd)
                 self.assertIn("Blocked", r.stderr)
         self.assertEqual(self.ws.log_lines("--action", "guard").count("blocked"), 8)
+
+    def asked(self, r):
+        out = json.loads(r.stdout)["hookSpecificOutput"]
+        return out["permissionDecision"] == "ask"
+
+    def test_asks_instead_of_blocking_when_pushing_the_work_branch_of_a_batch(self):
+        d = self.ws.batch("b1")
+        for cmd in ("git push origin int/b1", "git push -u origin int/b1", "git push origin HEAD", "git push -u origin HEAD:int/b1",
+                    "git push origin refs/heads/int/b1", "rtk git push origin int/b1"):
+            with self.subTest(cmd=cmd):
+                r = self.guard(cmd, d / "lib")
+                self.assertEqual(r.returncode, 0, cmd + r.stderr)
+                self.assertTrue(self.asked(r), cmd)
+        self.assertGreaterEqual(self.ws.log_lines("--action", "guard").count("ask"), 6)
+
+    def test_a_type_named_branch_of_the_worktree_can_be_pushed_by_name(self):
+        d = self.ws.batch("fix-login")
+        branch = self.ws.git(d / "lib", "branch", "--show-current")
+        self.assertEqual(branch, "fix/fix-login")
+        self.assertTrue(self.asked(self.guard(f"git push -u origin {branch}", d / "lib")))
+        self.assertEqual(self.guard("git push -u origin feat/other", d / "lib").returncode, 2, "only this worktree's branch")
+
+    def test_pushes_that_change_shared_state_stay_blocked(self):
+        d = self.ws.batch("b1")
+        for cmd in ("git push origin int/b1:next", "git push origin +int/b1", "git push --force origin int/b1", "git push -f origin int/b1",
+                    "git push --force-with-lease origin int/b1", "git push origin :int/b1", "git push --delete origin int/b1",
+                    "git push origin int/b1 next", "git push --all origin", "git push --mirror origin", "git push --tags origin",
+                    "git push origin v1.0", "git push", "git push origin", "git push -u origin", "git push /tmp/x.git int/b1",
+                    "git push origin main", "git push origin refs/tags/v1", "git push origin int/b1 && git push origin next",
+                    "git -C /tmp push origin HEAD", "bash -c 'git push origin next'"):
+            with self.subTest(cmd=cmd):
+                r = self.guard(cmd, d / "lib")
+                self.assertEqual(r.returncode, 2, cmd)
+                self.assertNotIn("permissionDecision", r.stdout)
+
+    def decision(self, command, cwd):
+        r = self.guard(command, cwd)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] if r.stdout.strip() else "allow"
+
+    def test_ship_asks_only_for_a_direct_push_to_base(self):
+        d = self.ws.batch("b1")
+        for where in (self.ws.root, d / "lib"):
+            with self.subTest(where=str(where)):
+                self.assertEqual(self.decision("ms-workspace ship b1 --yes", where), "ask")
+                self.assertEqual(self.decision("ms-workspace ship b1 --yes --direct --pr", where), "ask")
+                self.assertEqual(self.decision("ms-workspace ship b1 --yes --pr", where), "allow")
+                self.assertEqual(self.decision("ms-workspace ship b1", where), "allow", "a plan only")
+                self.assertEqual(self.decision("rtk ms-workspace ship b1 --pr --yes --title t", where), "allow")
+        self.assertEqual(self.decision("ms-workspace ship nope --yes", self.ws.root), "ask", "unknown batch: ask")
+        self.assertEqual(self.decision("ms-workspace ship --branch lib --yes", self.ws.root), "ask")
+
+    def test_ship_does_not_ask_when_every_repo_of_the_batch_opens_a_pr(self):
+        self.ws.set_toml(DEFAULT_TOML.replace('[repos.lib]\nbase = "next"', '[repos.lib]\nbase = "next"\npush = "pr"').replace('[repos.app]\nbase = "next"', '[repos.app]\nbase = "next"\npush = "pr"'))
+        self.ws.batch("b1")
+        self.assertEqual(self.decision("ms-workspace ship b1 --yes", self.ws.root), "allow")
+        self.ws.batch("b2", "lib")
+        self.assertEqual(self.decision("ms-workspace ship b2 --yes --direct", self.ws.root), "ask")
+
+    def test_clean_asks_only_when_it_would_discard(self):
+        self.ws.batch("b1")
+        self.assertEqual(self.decision("ms-workspace clean b1", self.ws.root), "allow")
+        self.assertEqual(self.decision("ms-workspace clean", self.ws.root), "allow")
+        self.assertEqual(self.decision("ms-workspace clean b1 --force", self.ws.root), "ask")
+
+    def test_a_newline_separates_commands(self):
+        d = self.ws.batch("b1")
+        self.assertEqual(self.guard("git status\ngit push origin next", d / "lib").returncode, 2)
+        self.assertEqual(self.guard("git commit -m 'two\nlines'\nls", d / "lib").returncode, 0)
+
+    def test_text_inside_a_heredoc_is_not_a_command(self):
+        d = self.ws.batch("b1")
+        doc = "python3 - <<'EOF'\nopen('x').write('run git push origin next from working-trees/b1')\nEOF"
+        self.assertEqual(self.guard(doc, d / "lib").returncode, 0)
+        self.assertEqual(self.guard("cat > notes.md <<EOF\ngit push origin next\nEOF\nls", d / "lib").returncode, 0)
+        self.assertEqual(self.guard("bash <<EOF\ngit push origin next\nEOF", d / "lib").returncode, 2, "a shell runs its heredoc")
+        self.assertEqual(self.guard("cat <<EOF\nhi\nEOF\ngit push origin next", d / "lib").returncode, 2, "what follows it still counts")
+
+    def test_a_push_to_the_base_branch_is_blocked_even_if_the_worktree_is_on_it(self):
+        d = self.ws.batch("b1")
+        self.ws.git(d / "lib", "switch", "-q", "--detach")
+        self.assertEqual(self.guard("git push origin HEAD", d / "lib").returncode, 2, "detached HEAD names no branch")
 
     def test_allows_normal_commands_inside_a_batch(self):
         d = self.ws.batch("b1")
@@ -1148,7 +1283,7 @@ class TestStatusline(Base):
         self.assertEqual(self.line(self.ws.root / "lib"), "[M] ⎇ next ctx 5%")
         self.assertEqual(self.line(self.ws.root / "lib", key="workspace"), "[M] ⎇ next ctx 5%")
         b = self.ws.batch("b1")
-        self.assertEqual(self.line(b / "lib"), "[M] ⎇ int/b1 ctx 5%")
+        self.assertEqual(self.line(b / "lib"), "[M] ⎇ feat/b1 ctx 5%")
         self.assertEqual(self.line(b / "lib" / "sub-missing"), "[M] ctx 5%")
 
     def test_detached_head_shows_the_short_hash_and_non_repos_show_nothing(self):
@@ -1178,7 +1313,7 @@ class TestLog(Base):
     def test_line_format(self):
         self.ws.batch("b1", "lib")
         line = self.ws.log_lines("-n", "1").strip()
-        self.assertRegex(line, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d \| ok \| batch\.new \| lib \| b1 \| int/b1 from origin/next$")
+        self.assertRegex(line, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d \| ok \| batch\.new \| lib \| b1 \| feat/b1 from origin/next$")
 
     def test_empty_log(self):
         self.assertIn("no log yet", self.ws.log_lines())
@@ -1584,6 +1719,16 @@ class TestSetupHooks(Base):
     def setup(self, *args):
         return self.ws.ms("setup-hooks", *args, cwd=self.ws.tmp, env=self.env)
 
+    def test_an_older_install_loses_the_ask_rules_that_would_beat_the_new_allow_rules(self):
+        self.home.mkdir(parents=True)
+        self.settings.write_text(json.dumps({"permissions": {"ask": ["Bash(ms-workspace ship:*)", "Bash(ms-workspace clean:*)", "Bash(mine:*)"]}}))
+        self.assertOk(self.setup())
+        data = self.load()
+        self.assertNotIn("Bash(ms-workspace ship:*)", data["permissions"]["ask"])
+        self.assertNotIn("Bash(ms-workspace clean:*)", data["permissions"]["ask"])
+        self.assertIn("Bash(mine:*)", data["permissions"]["ask"], "the user's own rules stay")
+        self.assertIn("Bash(ms-workspace ship:*)", data["permissions"]["allow"])
+
     def load(self):
         return json.loads(self.settings.read_text())
 
@@ -1722,9 +1867,12 @@ class TestSetupHooks(Base):
         self.assertEqual(data["statusLine"]["command"], "ms-statusline")
         self.assertNotIn("Bash(ms-workspace:*)", data["permissions"]["allow"], "the broad rule would auto-approve ship")
         self.assertIn("Bash(ms-workspace status:*)", data["permissions"]["allow"])
-        for risky in ("ship", "clean", "undo", "env", "setup-hooks"):
+        for risky in ("undo", "env", "setup-hooks"):
             self.assertIn(f"Bash(ms-workspace {risky}:*)", data["permissions"]["ask"])
             self.assertNotIn(f"Bash(ms-workspace {risky}:*)", data["permissions"]["allow"])
+        for guarded in ("ship", "clean"):   # the guard hook asks for these only when it matters
+            self.assertIn(f"Bash(ms-workspace {guarded}:*)", data["permissions"]["allow"])
+            self.assertNotIn(f"Bash(ms-workspace {guarded}:*)", data["permissions"]["ask"])
         before = self.settings.read_text()
         r = self.setup()
         self.assertIn("Already up to date", r.stdout)
@@ -1849,7 +1997,9 @@ class TestPackaging(unittest.TestCase):
         self.assertEqual(cmds, {"ms-workspace guard", "ms-workspace context", "ms-workspace images capture", "ms-workspace readguard",
                                 "ms-workspace outguard", "ms-workspace setupcheck", "ms-workspace readguard --reset", "ms-workspace handoff --hook", "ms-workspace notify --hook"})
         self.assertNotIn("Bash(ms-workspace:*)", data["permissions"]["allow"])
-        self.assertTrue({"Bash(ms-workspace ship:*)", "Bash(ms-workspace clean:*)", "Bash(ms-workspace undo:*)", "Bash(ms-workspace promote:*)"} <= set(data["permissions"]["ask"]))
+        self.assertTrue({"Bash(ms-workspace undo:*)", "Bash(ms-workspace promote:*)"} <= set(data["permissions"]["ask"]))
+        self.assertTrue({"Bash(ms-workspace ship:*)", "Bash(ms-workspace clean:*)"} <= set(data["permissions"]["allow"]), "the guard hook asks when it matters")
+        self.assertFalse({"Bash(ms-workspace ship:*)", "Bash(ms-workspace clean:*)"} & set(data["permissions"]["ask"]), "an ask rule would beat the allow rule")
         self.assertEqual(data["statusLine"]["command"], "ms-statusline")
 
     def test_code_stays_valid_for_the_minimum_python(self):
@@ -1936,7 +2086,7 @@ class TestUnintegratedWork(Base):
         self.assertNotEqual(self.ws.ms("plan", "b1").returncode, 0, "the plan fails early too")
 
     def test_clean_refuses_even_after_the_batch_branch_reached_the_remote(self):
-        self.ws.git(self.d / "lib", "push", "-q", "origin", "int/b1:next")   # int/b1 is now part of next
+        self.ws.git(self.d / "lib", "push", "-q", "origin", "feat/b1:next")   # feat/b1 is now part of next
         self.assertIn("pending", self.ws.ms("clean").stdout)
         r = self.ws.ms("clean", "b1")
         self.assertNotEqual(r.returncode, 0)
@@ -1980,7 +2130,7 @@ class TestRollbackAndNames(Base):
         r = self.ws.ms("batch", "new", "b1", "lib", "ghost")
         self.assertNotEqual(r.returncode, 0)
         self.assertFalse((self.ws.root / ".batches" / "b1").exists())
-        self.assertNotIn("int/b1", self.ws.git(self.ws.root / "lib", "branch", "--list"))
+        self.assertNotIn("feat/b1", self.ws.git(self.ws.root / "lib", "branch", "--list"))
         self.assertNotIn(".batches", self.ws.git(self.ws.root / "lib", "worktree", "list"))
         self.assertOk(self.ws.ms("batch", "new", "b1", "lib"))   # a rerun works
 
@@ -2059,10 +2209,10 @@ class TestPrMode(Base):
     def test_pr_mode_pushes_the_branch_and_opens_a_pr(self):
         r = self.ws.ms("ship", "b1", "--yes", "--skip-e2e", env={"PATH": self.fake_path(True)})
         self.assertOk(r)
-        self.assertIn("int/b1", self.ws.git(self.ws.tmp / "remote-lib.git", "branch", "--list"))
+        self.assertIn("feat/b1", self.ws.git(self.ws.tmp / "remote-lib.git", "branch", "--list"))
         self.assertNotIn("feature", self.ws.remote_log("lib"), "pr mode must not touch the base branch")
         call = (self.ws.tmp / "gh-calls").read_text()
-        self.assertIn("pr create --base next --head int/b1", call)
+        self.assertIn("pr create --base next --head feat/b1", call)
 
     def test_pr_flag_opens_a_pr_even_when_the_repo_pushes_directly(self):
         self.ws.set_toml(DEFAULT_TOML)   # lib is "direct" here
@@ -2074,8 +2224,8 @@ class TestPrMode(Base):
         r = self.ws.ms("ship", "b1", "--yes", "--pr", "--skip-e2e", env=env)
         self.assertOk(r)
         self.assertNotIn("feature", self.ws.remote_log("lib"), "--pr must not touch the base branch")
-        self.assertIn("int/b1", self.ws.git(self.ws.tmp / "remote-lib.git", "branch", "--list"))
-        self.assertIn("pr create --base next --head int/b1", (self.ws.tmp / "gh-calls").read_text())
+        self.assertIn("feat/b1", self.ws.git(self.ws.tmp / "remote-lib.git", "branch", "--list"))
+        self.assertIn("pr create --base next --head feat/b1", (self.ws.tmp / "gh-calls").read_text())
         undo = self.ws.ms("undo", "b1", env=env)
         self.assertIn("gh pr close", undo.stdout)
 
@@ -2115,14 +2265,14 @@ class TestPrMode(Base):
         r = self.ws.ms("ship", "b1", "--yes", "--pr", "--skip-e2e", env={"PATH": self.fake_path(False)})
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("needs the GitHub CLI", r.stderr)
-        self.assertNotIn("int/b1", self.ws.git(self.ws.tmp / "remote-lib.git", "branch", "--list"))
+        self.assertNotIn("feat/b1", self.ws.git(self.ws.tmp / "remote-lib.git", "branch", "--list"))
 
     def test_missing_gh_stops_before_anything_is_pushed(self):
         r = self.ws.ms("ship", "b1", "--yes", "--skip-e2e", env={"PATH": self.fake_path(False)})
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("gh", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
-        self.assertNotIn("int/b1", self.ws.git(self.ws.tmp / "remote-lib.git", "branch", "--list"))
+        self.assertNotIn("feat/b1", self.ws.git(self.ws.tmp / "remote-lib.git", "branch", "--list"))
 
 
 # ------------------------------------------------------- guard: fail closed
@@ -2657,7 +2807,7 @@ class TestUndo(Base):
         path.write_text(json.dumps(rec))
         out = self.ws.ms("undo", "b1", "--yes").stdout
         self.assertIn("app: was not pushed", out)
-        self.assertIn("gh pr close --delete-branch int/b1", out)
+        self.assertIn("gh pr close --delete-branch feat/b1", out)
         self.assertIn("feat.txt", self.remote_files("app"))
         self.assertIn("feat.txt", self.remote_files("lib"))
 

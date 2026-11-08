@@ -12,7 +12,8 @@ Deterministic on purpose: skills and hooks call it so the model does not
 have to spend tokens on git/test plumbing.
 
 Usage:
-  ms-workspace batch new <name> [repo...]    create a batch (one worktree per repo, branch int/<name>)
+  ms-workspace batch new <name> [--type feat|fix|...] [repo...]   create a batch (one worktree per repo, branch <type>/<name>)
+  ms-workspace branch new <name> [repo] [--type T]   plain local branch <type>/<name> in the repo's own checkout, from its base (no worktree)
   ms-workspace affected                      JSON: changed repos/modules and their dependents
   ms-workspace agent new <batch> <task> [repo...]   isolated worktree per agent (branch agent/<batch>/<task>)
   ms-workspace open <batch> [--ide code|idea] [--repo R] [--agent TASK] [--dry-run]   open the batch's worktrees in VS Code or IntelliJ (git untouched)
@@ -20,7 +21,7 @@ Usage:
   ms-workspace test t0                       test what changed in the current repo (add --no-cache to force a run)
   ms-workspace test t1 [batch]               affected + critical modules for every changed repo of the batch
   ms-workspace test t2 [batch]               end-to-end command from [e2e] in workspace.toml
-  ms-workspace integrate <batch> [--dry-run] merge agent branches into int/<batch> (conflicts detected first)
+  ms-workspace integrate <batch> [--dry-run] merge agent branches into the batch's branch (conflicts detected first)
   ms-workspace ship <batch> [--yes] [--pr] [--skip-e2e]   sync with base, test, push (plan only without --yes); --pr opens a PR instead of pushing to base
   ms-workspace plan <batch>                  same as `ship` without --yes: shows what would be sent, changes nothing
   ms-workspace undo <batch> [--yes]          revert the last ship: adds a commit restoring the old tree (never force-pushes)
@@ -56,7 +57,7 @@ Usage:
   ms-workspace release status|notes [repo]   what waits to be promoted from the base branch to qa/main, grouped by commit type, and release notes
   ms-workspace notify <message> [--title T] | --test | --hook   send a notification (ntfy, webhook or local command from [notify]); also a Notification hook
   ms-workspace doctor                        check tools, versions, resources and workspace.toml
-  ms-workspace guard                         PreToolUse hook: blocks git push / gh pr create|merge in batch worktrees
+  ms-workspace guard                         PreToolUse hook in batch worktrees: asks before pushing a work branch, blocks pushes to base/force and gh pr create|merge
 
 Workspace discovery: $MS_WORKSPACE, else the nearest parent holding .dynamia/workspace.toml (or, older layout, workspace.toml).
 """
@@ -157,7 +158,7 @@ def _dispatch(cmd: str, args: list[str]) -> int:
 
     from . import batches, claude_md, insights, memory, overview, runner, tokens
     table = {
-        "batch": batches.cmd_batch, "agent": batches.cmd_agent, "affected": batches.cmd_affected,
+        "batch": batches.cmd_batch, "branch": batches.cmd_branch, "agent": batches.cmd_agent, "affected": batches.cmd_affected,
         "env": batches.cmd_env, "integrate": batches.cmd_integrate, "ship": batches.cmd_ship,
         "clean": batches.cmd_clean, "undo": batches.cmd_undo, "plan": lambda ws, a: batches.cmd_ship(ws, [x for i, x in enumerate(a) if i == 0 or x == "--pr" or (a[0] == "--branch" and i == 1 and not x.startswith("-"))]), "test": runner.cmd_test, "log": overview.cmd_log,
         "status": overview.cmd_status, "claude-md": claude_md.cmd_claude_md,
