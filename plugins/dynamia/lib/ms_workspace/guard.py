@@ -182,6 +182,49 @@ def analyze(command: str, depth: int = 0, asks: list[str] | None = None, ctx: Ct
     return None
 
 
+def confirm_reasons(root, command: str) -> list[str]:
+    """Commands that need the user's yes wherever they run: a ship that pushes straight to a base branch, and a forced clean.
+    A ship that only opens PRs (`--pr`, or every repo of the batch has push = "pr") and a clean of a merged batch go through:
+    the first is reversible, the second refuses by itself unless the work is already in the base branch."""
+    out: list[str] = []
+    try:
+        segs = _segments(command)
+    except ValueError:
+        return out
+    ws = None
+    for seg in segs:
+        seg = _strip(seg)
+        if not seg or os.path.basename(seg[0]) != "ms-workspace":
+            continue
+        args = seg[1:]
+        words = [a for a in args if not a.startswith("-")]
+        sub = words[0] if words else ""
+        if sub == "clean" and "--force" in args:
+            out.append("clean --force discards a batch that is not merged")
+        elif sub == "ship" and "--yes" in args:
+            if "--pr" in args and "--direct" not in args:
+                continue
+            try:
+                from .core import Workspace, batch_repos
+                ws = ws or Workspace(root)
+                if "--direct" in args:
+                    raise ValueError("direct")
+                if "--branch" in args:
+                    repos = [words[1]] if len(words) > 1 else []
+                else:
+                    repos = batch_repos(ws, words[1]) if len(words) > 1 else []
+                if not repos or any((ws.repo_cfg(r).get("push") or "direct") != "pr" for r in repos):
+                    raise ValueError("direct")
+            except Exception:
+                out.append("ship pushes straight to the base branch (use --pr to open a pull request instead)")
+    return out
+
+
+def _ask(root, command: str, reason: str) -> None:
+    _log(root, "ask", command)
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask", "permissionDecisionReason": reason}}))
+
+
 def _log(root, outcome: str, command: str) -> None:
     try:
         from .core import Workspace
@@ -233,8 +276,11 @@ def cmd_guard() -> int:
     if root is None:
         return 0
     names = {".batches", batch_dirname(root)}
+    confirm = confirm_reasons(root, command)
     # Inside a batch, or reaching into one from elsewhere (`cd .batches/b/lib && git push`).
     if not (any((os.getcwd() + "/").startswith(str(root / n) + "/") for n in names) or any(n in command for n in names)):
+        if confirm:
+            _ask(root, command, "; ".join(confirm) + ".")
         return 0
     asks: list[str] = []
     try:
@@ -245,9 +291,7 @@ def cmd_guard() -> int:
         _log_blocked(root, f"{command}  [{reason}]")
         print(MESSAGE, file=sys.stderr)
         return 2
-    if asks:
-        _log(root, "ask", command)
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
-              "permissionDecisionReason": "Push of a batch work branch to origin (" + "; ".join(asks) + "). Not the base branch, no force. "
-                                          "Allow it to back up or share work in progress."}}))
+    if asks or confirm:
+        why = ["Push of a batch work branch to origin (" + "; ".join(asks) + "). Not the base branch, no force. Allow it to back up or share work in progress."] if asks else []
+        _ask(root, command, " ".join(why + [c + "." for c in confirm]))
     return 0

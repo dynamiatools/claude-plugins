@@ -649,6 +649,36 @@ class TestGuard(Base):
                 self.assertEqual(r.returncode, 2, cmd)
                 self.assertNotIn("permissionDecision", r.stdout)
 
+    def decision(self, command, cwd):
+        r = self.guard(command, cwd)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] if r.stdout.strip() else "allow"
+
+    def test_ship_asks_only_for_a_direct_push_to_base(self):
+        d = self.ws.batch("b1")
+        for where in (self.ws.root, d / "lib"):
+            with self.subTest(where=str(where)):
+                self.assertEqual(self.decision("ms-workspace ship b1 --yes", where), "ask")
+                self.assertEqual(self.decision("ms-workspace ship b1 --yes --direct --pr", where), "ask")
+                self.assertEqual(self.decision("ms-workspace ship b1 --yes --pr", where), "allow")
+                self.assertEqual(self.decision("ms-workspace ship b1", where), "allow", "a plan only")
+                self.assertEqual(self.decision("rtk ms-workspace ship b1 --pr --yes --title t", where), "allow")
+        self.assertEqual(self.decision("ms-workspace ship nope --yes", self.ws.root), "ask", "unknown batch: ask")
+        self.assertEqual(self.decision("ms-workspace ship --branch lib --yes", self.ws.root), "ask")
+
+    def test_ship_does_not_ask_when_every_repo_of_the_batch_opens_a_pr(self):
+        self.ws.set_toml(DEFAULT_TOML.replace('[repos.lib]\nbase = "next"', '[repos.lib]\nbase = "next"\npush = "pr"').replace('[repos.app]\nbase = "next"', '[repos.app]\nbase = "next"\npush = "pr"'))
+        self.ws.batch("b1")
+        self.assertEqual(self.decision("ms-workspace ship b1 --yes", self.ws.root), "allow")
+        self.ws.batch("b2", "lib")
+        self.assertEqual(self.decision("ms-workspace ship b2 --yes --direct", self.ws.root), "ask")
+
+    def test_clean_asks_only_when_it_would_discard(self):
+        self.ws.batch("b1")
+        self.assertEqual(self.decision("ms-workspace clean b1", self.ws.root), "allow")
+        self.assertEqual(self.decision("ms-workspace clean", self.ws.root), "allow")
+        self.assertEqual(self.decision("ms-workspace clean b1 --force", self.ws.root), "ask")
+
     def test_a_newline_separates_commands(self):
         d = self.ws.batch("b1")
         self.assertEqual(self.guard("git status\ngit push origin next", d / "lib").returncode, 2)
@@ -1689,6 +1719,16 @@ class TestSetupHooks(Base):
     def setup(self, *args):
         return self.ws.ms("setup-hooks", *args, cwd=self.ws.tmp, env=self.env)
 
+    def test_an_older_install_loses_the_ask_rules_that_would_beat_the_new_allow_rules(self):
+        self.home.mkdir(parents=True)
+        self.settings.write_text(json.dumps({"permissions": {"ask": ["Bash(ms-workspace ship:*)", "Bash(ms-workspace clean:*)", "Bash(mine:*)"]}}))
+        self.assertOk(self.setup())
+        data = self.load()
+        self.assertNotIn("Bash(ms-workspace ship:*)", data["permissions"]["ask"])
+        self.assertNotIn("Bash(ms-workspace clean:*)", data["permissions"]["ask"])
+        self.assertIn("Bash(mine:*)", data["permissions"]["ask"], "the user's own rules stay")
+        self.assertIn("Bash(ms-workspace ship:*)", data["permissions"]["allow"])
+
     def load(self):
         return json.loads(self.settings.read_text())
 
@@ -1827,9 +1867,12 @@ class TestSetupHooks(Base):
         self.assertEqual(data["statusLine"]["command"], "ms-statusline")
         self.assertNotIn("Bash(ms-workspace:*)", data["permissions"]["allow"], "the broad rule would auto-approve ship")
         self.assertIn("Bash(ms-workspace status:*)", data["permissions"]["allow"])
-        for risky in ("ship", "clean", "undo", "env", "setup-hooks"):
+        for risky in ("undo", "env", "setup-hooks"):
             self.assertIn(f"Bash(ms-workspace {risky}:*)", data["permissions"]["ask"])
             self.assertNotIn(f"Bash(ms-workspace {risky}:*)", data["permissions"]["allow"])
+        for guarded in ("ship", "clean"):   # the guard hook asks for these only when it matters
+            self.assertIn(f"Bash(ms-workspace {guarded}:*)", data["permissions"]["allow"])
+            self.assertNotIn(f"Bash(ms-workspace {guarded}:*)", data["permissions"]["ask"])
         before = self.settings.read_text()
         r = self.setup()
         self.assertIn("Already up to date", r.stdout)
@@ -1954,7 +1997,9 @@ class TestPackaging(unittest.TestCase):
         self.assertEqual(cmds, {"ms-workspace guard", "ms-workspace context", "ms-workspace images capture", "ms-workspace readguard",
                                 "ms-workspace outguard", "ms-workspace setupcheck", "ms-workspace readguard --reset", "ms-workspace handoff --hook", "ms-workspace notify --hook"})
         self.assertNotIn("Bash(ms-workspace:*)", data["permissions"]["allow"])
-        self.assertTrue({"Bash(ms-workspace ship:*)", "Bash(ms-workspace clean:*)", "Bash(ms-workspace undo:*)", "Bash(ms-workspace promote:*)"} <= set(data["permissions"]["ask"]))
+        self.assertTrue({"Bash(ms-workspace undo:*)", "Bash(ms-workspace promote:*)"} <= set(data["permissions"]["ask"]))
+        self.assertTrue({"Bash(ms-workspace ship:*)", "Bash(ms-workspace clean:*)"} <= set(data["permissions"]["allow"]), "the guard hook asks when it matters")
+        self.assertFalse({"Bash(ms-workspace ship:*)", "Bash(ms-workspace clean:*)"} & set(data["permissions"]["ask"]), "an ask rule would beat the allow rule")
         self.assertEqual(data["statusLine"]["command"], "ms-statusline")
 
     def test_code_stays_valid_for_the_minimum_python(self):

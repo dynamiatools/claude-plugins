@@ -137,6 +137,8 @@
       "Bash(ms-workspace plan:*)",
       "Bash(ms-workspace test:*)",
       "Bash(ms-workspace integrate:*)",
+      "Bash(ms-workspace ship:*)",
+      "Bash(ms-workspace clean:*)",
       "Bash(ms-workspace batch new:*)",
       "Bash(ms-workspace branch new:*)",
       "Bash(ms-workspace agent new:*)",
@@ -175,9 +177,7 @@
       "Bash(ms-workspace release:*)"
     ],
     "ask": [
-      "Bash(ms-workspace ship:*)",
       "Bash(ms-workspace promote:*)",
-      "Bash(ms-workspace clean:*)",
       "Bash(ms-workspace env:*)",
       "Bash(ms-workspace open:*)",
       "Bash(ms-workspace setup-hooks:*)",
