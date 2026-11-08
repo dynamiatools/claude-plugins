@@ -57,6 +57,7 @@ Usage:
   ms-workspace release status|notes [repo]   what waits to be promoted from the base branch to qa/main, grouped by commit type, and release notes
   ms-workspace notify <message> [--title T] | --test | --hook   send a notification (ntfy, webhook or local command from [notify]); also a Notification hook
   ms-workspace doctor                        check tools, versions, resources and workspace.toml
+  ms-workspace thanos start|resume|estimate|status|task|block|pause|done|stop   autonomous mission in its own batch (strict guard, step cap, Opus reviews)
   ms-workspace guard                         PreToolUse hook in batch worktrees: asks before pushing a work branch, blocks pushes to base/force and gh pr create|merge
 
 Workspace discovery: $MS_WORKSPACE, else the nearest parent holding .dynamia/workspace.toml (or, older layout, workspace.toml).
@@ -89,6 +90,12 @@ def _dispatch(cmd: str, args: list[str]) -> int:
     if cmd == "guard":
         from .guard import cmd_guard
         return cmd_guard()
+    if cmd == "thanosguard":
+        from .thanos import hook_guard
+        return hook_guard()
+    if cmd == "thanos":
+        from .thanos import cmd_thanos
+        return cmd_thanos(Workspace.load(required=False), args)
     if cmd == "images":
         from .images import cmd_images
         return cmd_images(args)

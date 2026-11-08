@@ -13,13 +13,14 @@ input="$(cat)"
 CACHE_DIR="${MS_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/ms-workspace}"
 mkdir -p "$CACHE_DIR" 2>/dev/null || true
 
-IFS=$'\t' read -r model cwd cost ctx p5 r5 p7 r7 < <(jq -r '[
+IFS=$'\t' read -r model cwd cost ctx p5 r5 p7 r7 sid < <(jq -r '[
     (.model.display_name // "?"),
     (.workspace.current_dir // .cwd // "-"),
     (.cost.total_cost_usd | if type == "number" then (. * 100 | round) else "-" end),
     (.context_window.used_percentage // "-"),
     (.rate_limits.five_hour.used_percentage // "-"), (.rate_limits.five_hour.resets_at // "-"),
-    (.rate_limits.seven_day.used_percentage // "-"), (.rate_limits.seven_day.resets_at // "-")
+    (.rate_limits.seven_day.used_percentage // "-"), (.rate_limits.seven_day.resets_at // "-"),
+    (.session_id // "-")
   ] | map(tostring) | @tsv' <<<"$input" 2>/dev/null) || exit 0
 
 now="$(date +%s)"
@@ -72,7 +73,22 @@ fi
 # Colors are off when NO_COLOR is set (https://no-color.org).
 if [[ -n "${NO_COLOR:-}" ]]; then c() { :; }; reset=""; else c() { printf '\033[%sm' "$1"; }; reset=$'\033[0m'; fi
 
-out="$(c 36)[$model]$reset"
+# THANOS badge: shown while a mission is attached to this session (the pointer is written by `ms-workspace thanos`; ignored when 12 h old).
+badge=""
+tfile="$CACHE_DIR/thanos/${sid//[^A-Za-z0-9_-]/}.json"
+if [[ "$sid" != "-" && -f "$tfile" && -z "$(find "$tfile" -mmin +720 2>/dev/null)" ]]; then
+  case "$(jq -r '.status // empty' "$tfile" 2>/dev/null)" in
+    working) label="[THANOS IS WORKING]"; style='1;97;48;2;110;50;160' ;;   # white bold on Thanos purple
+    paused)  label="[THANOS PAUSED]";     style='1;30;48;2;230;160;30' ;;
+    done)    label="[THANOS DONE]";       style='1;97;48;2;30;130;60' ;;
+    *)       label="" ;;
+  esac
+  if [[ -n "$label" ]]; then
+    if [[ -n "${NO_COLOR:-}" ]]; then badge="$label "; else badge="$(c "$style")$label$reset "; fi
+  fi
+fi
+
+out="$badge$(c 36)[$model]$reset"
 if [[ -n "$branch" ]]; then
   out+=" $(c 35)⎇ $branch$reset"
   [[ "${dirty:-0}" -gt 0 ]] && out+=" $(c 33)●$dirty$reset"

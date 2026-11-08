@@ -10,7 +10,7 @@ AI coding gets expensive and risky when the model does the boring parts: jugglin
 - **Spend tokens on purpose.** Cheap helper agents search and summarize; reports show where the plan went.
 - **Humans publish.** Agents commit locally. You decide what ships.
 
-It has 20 skills, 4 read-only helper agents, guard hooks, a standard-library Python tool (`ms-workspace`) and a status line.
+It has 21 skills, 4 read-only helper agents, guard hooks, a standard-library Python tool (`ms-workspace`) and a status line.
 
 ## Install
 
@@ -51,6 +51,7 @@ These read `workspace.toml`. Without one the tool answers `no .dynamia/workspace
 | `/dynamia:test` | Runs t0 (changed), t1 (whole batch) or t2 (end to end); triages failures | Cheap, cached test levels so the model does not run or read whole suites |
 | `/dynamia:integrate` | Merges agent branches into the batch, reports conflicts, runs t1 | Makes parallel agents safe |
 | `/dynamia:ship` | Plan, sync, tests, push or PR. Only when you ask | Controlled publishing in one place |
+| `/dynamia:thanos` | An autonomous mission: plans, works task by task in its own worktree, validates with Opus at the start and the end, and never ships. Strict guard, step cap, purple status badge | Long goals with few interruptions, without giving up the guard rails. Only when you ask |
 | `/dynamia:dev-env` | Registers dev environment variables per repo or for all | Tests and e2e run with the right variables, kept out of the model's hands |
 | `/dynamia:open` | Opens a batch or an agent's worktrees in VS Code or IntelliJ | Review the work where you are used to reading code |
 | `/dynamia:memory` | Saves and finds durable notes: decisions, lessons, gotchas, handoffs | The log says what happened; notes say what was learned |

@@ -80,6 +80,13 @@ deps = ["core-lib"]
 unit = "mvn -T1C -B test"
 affected = "mvn -T1C -B test -pl {modules} -amd"
 
+# Optional: THANOS (autonomous mission) limits. Every key has a default.
+# [thanos]
+# max_steps  = 30                       # autonomous turns before it pauses (override per mission: thanos start --max-steps N)
+# max_opus   = 3                        # Opus reviews per mission: start, end, and one rescue
+# push_every = 3                        # push the batch branch to origin every N finished tasks (0 = never)
+# deny_hosts = ["erp.example.com"]      # a command that names one of these is blocked during a mission
+
 [e2e]
 command = "docker compose -f e2e/docker-compose.yml up --abort-on-container-exit"
 repo = "erp"
