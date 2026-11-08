@@ -1,6 +1,6 @@
 # Action flows, field components and theme
 
-Checked against framework 26.10: `@dynamia-tools/ui-core` (`runActionFlow`, `FieldComponentRegistry`, `registerClientAction`), `@dynamia-tools/sdk` (generated `ui-contract`), `docs/frontend/FIELD_COMPONENTS.md`, `docs/design/HEADLESS_ACTIONS.md`.
+Checked against framework 26.11: `@dynamia-tools/ui-core` (`runActionFlow`, `FieldComponentRegistry`, `registerClientAction`), `@dynamia-tools/sdk` (generated `ui-contract`), `docs/frontend/FIELD_COMPONENTS.md`, `docs/design/HEADLESS_ACTIONS.md`.
 
 ## Running a server action (headless or flow)
 Entity actions are published in the entity metadata with a runtime: `HEADLESS`, `FLOW`, `REMOTE`, `FRONTEND` or `UNDECLARED` (`ACTION_RUNTIMES`). `HEADLESS` and `FLOW` actions answer with **steps**; the client loop shows each one and resumes with the answer. Do not write the loop yourself: use `runActionFlow` from `@dynamia-tools/ui-core`.
@@ -14,11 +14,16 @@ const response = await runActionFlow(client, actionMetadata, request, {
 });
 ```
 - Step types by port: messages `CONFIRM`, `INPUT`, `NOTIFY`; choices `CHOICE`; files `UPLOAD`; progress `PROGRESS`; views `DIALOG`, `VIEW`; navigation `REDIRECT`; the final one is `DONE`. A step carries `flowId`, `type`, `title`, `message`, `data`, `fieldErrors`, `hints` and a signed, expiring `resumeToken`.
+- Final effects arrive in `params` of the last response and `runActionFlow` hands them to optional handlers: `previewFile` (`params.downloads[].disposition: 'inline'`, only `isInlineAllowed` types, default opens a tab and saves when the popup is blocked), `saveFile` (other downloads), `showClipboardFallback(text)` (`params.clipboard`; the runner writes `navigator.clipboard` first), `openPage(path, params)` (`params.page`; `isPagePath` rejects URLs, `..` and leading `/`; ignored without the handler) and `refresh()` (`params.refresh`). Question handlers: `choose` (CHOICE, returns keys), `pickEntity({title, search})` (CHOICE with a `lookup`, returns the chosen key; required for such steps; `search` wraps `client.lookups.search(name, query, limit)`), `pickFiles` (UPLOAD, defaults to the browser picker; content goes to `/apps/api/transfers`, never inside the flow), `showProgress(status)` (PROGRESS, `progressIntervalMs` default 500).
 - Each resume sends the user's answer with the step's `flowId` and `resumeToken`; the server re-runs the action with the answers so far (replay, `dynamia-platform:backend` `references/headless-actions.md`). The client holds nothing but the token.
 - A plain `RemoteAction` with no `flow` in its response resolves on the first call.
 - `REDIRECT` and `CALL` steps are **experimental**.
-- Pure UI actions (find, filters) are `FRONTEND`: register your own in TypeScript with `registerClientAction`; there is no server runtime named `CLIENT` anymore.
+- Pure UI actions are `FRONTEND`: register your own in TypeScript with `registerClientAction`; there is no server runtime named `CLIENT` anymore.
 - Dispatch rules for CRUD pages live in `crudActionDispatch.ts` / `useCrudPage`; prefer `DynamiaCrudPage` and let it run the flow.
+
+## List queries and toolbar controls
+`client.crud(path).find(spec)` calls `POST /api/{path}/find` with a `QuerySpec` (`filters: {field, op, value}[]`, `search`, `sort`, `page`, `size`; ops `eq like between gte lte in isNull`) and returns the same list result as `findAll`. An invalid field or value is a 422 `DynamiaApiError` naming it. The per-field query parameters of `GET /api/{path}` no longer exist: use `find`.
+Actions published with a `control` (renderer key `control`, runtime `FRONTEND`) are toolbar widgets: kinds `DATE`, `DATE_RANGE`, `DATETIME_RANGE`, `TEXT`, `CHOICE` with `field`, `label`, `options`, `allLabel` and a symbolic `preset` (`TODAY`, `THIS_MONTH`, `LAST_MONTH`, resolve it in the user's time zone). `@dynamia-tools/vue` draws them (`VueControlActionRenderer`) and calls `TableView.setQueryFilter(field, filter)`; do not execute those actions on the server. Server side: `dynamia-platform:backend` `references/portable-controls.md`.
 
 ## Field components
 `FieldResolver` picks the component for a descriptor field: the descriptor's `component:` or `params.component`; a collection of entities (`entityrefmultipicker` with `params.entityAlias`, else `label`); a single entity (`entityrefpicker` with `entityAlias`, else read-only `entityreflabel`); else by field class (text, integer, decimal, checkbox, date, enum combobox; unknown is `textbox`).
