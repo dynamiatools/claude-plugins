@@ -291,6 +291,20 @@ class TestRunner(Base):
         self.assertOk(r)
         self.assertIn("PASS t0 lib", r.stdout)
 
+    def test_a_green_pnpm_recursive_run_warns_when_the_root_has_its_own_test_script(self):
+        self.ws.set_toml(DEFAULT_TOML.replace('unit = "echo unit-lib"', 'unit = "echo pnpm -r test"'))
+        d = self.ws.batch("b1")
+        wt = d / "lib"
+        r = self.ws.ms("test", "t0", cwd=wt)
+        self.assertOk(r)
+        self.assertNotIn("WARN", r.stderr, "no root test script, nothing to skip")
+        self.ws.commit(wt, "root suite", {"package.json": json.dumps({"scripts": {"test": "vitest run"}})})
+        r = self.ws.ms("test", "t0", cwd=wt)
+        self.assertOk(r)
+        self.assertIn("WARN t0 lib", r.stderr)
+        self.assertIn("vitest run", r.stderr)
+        self.assertIn('unit = "pnpm test"', r.stderr)
+
     def test_t0_fail_returns_code_and_shows_output(self):
         self.ws.set_toml(DEFAULT_TOML.replace('unit = "echo unit-lib"', 'unit = "echo boom-line; exit 3"'))
         d = self.ws.batch("b1")
