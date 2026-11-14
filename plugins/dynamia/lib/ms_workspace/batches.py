@@ -495,7 +495,7 @@ def _ship(ws: Workspace, args: list[str]) -> int:
     for r in repos:
         wt, base = place[r][0], ws.base(r)
         mode = modes[r] = effective_mode(ws, r, wt, base, force_pr, force_direct)
-        if mode == "pr" and not shutil.which("gh"):
+        if mode == "pr" and yes and not shutil.which("gh"):
             die(f"{r}: a pull request needs the GitHub CLI (gh) in PATH; nothing was pushed")
         ref = base_ref(wt, base)
         n = ahead_of_base(wt, base)
@@ -595,7 +595,11 @@ def _ship(ws: Workspace, args: list[str]) -> int:
                before=record["repos"][r]["before"][:12], after=record["repos"][r]["after"][:12])
         print(f"  pushed {r}" + (f": PR {pr_url}" if pr_url else ""))
     ws._shipped = list(repos)
-    print(f"Shipped. " + ("The branch stays in your checkout; delete it when merged. " if plain else f"Cleanup: ms-workspace clean {batch}. ") + f"To revert: ms-workspace undo {batch}")
+    opened = any(m == "pr" for m in modes.values())
+    tail = ("The branch stays in your checkout; delete it when merged. " if plain else
+            f"The PR is open: merge it (ms-workspace merge {batch} --yes, or on GitHub) and then clean: ms-workspace clean {batch}. " if opened else
+            f"Cleanup: ms-workspace clean {batch}. ")
+    print("Shipped. " + tail + f"To revert: ms-workspace undo {batch}")
     return 0
 
 

@@ -56,7 +56,7 @@ def pass_warning(directory: Path, cmd: str) -> str:
             root_test = json.loads((directory / "package.json").read_text()).get("scripts", {}).get("test")
         except (OSError, ValueError):
             root_test = None
-        if root_test:
+        if root_test and not re.search(r"(^|\s)(-r|--recursive)(\s|$)", root_test):   # a root script that is itself `pnpm -r test` runs them all
             return (f"the root package.json has its own test script ('{root_test}') that `pnpm -r test` does not run; "
                     "set [repos.<repo>.test] unit = \"pnpm test\" in workspace.toml if the root suite matters")
     return ""

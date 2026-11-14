@@ -6,7 +6,7 @@
     ms-workspace thanos status [batch]            one line: status, steps, tasks, Opus reviews
     ms-workspace thanos task start|done <name>    a branch per task, merged into the batch branch when it is done
     ms-workspace thanos block [--task NAME] "<what and why>"   record something the guard refused (and park that task [!]), then move on
-    ms-workspace thanos wait [MINUTES]            waiting for a background agent: stops in that window are not counted as steps
+    ms-workspace thanos wait [MINUTES]            waiting for a background agent: the next stop is not counted as a step (plan usage is still enforced)
     ms-workspace thanos pause "<why>" | done [--force] | stop
     ms-workspace thanos stop-hook | context       hooks (Stop, SessionStart)
     ms-workspace thanosguard                      hook (PreToolUse for Edit, Write and Agent)
@@ -17,7 +17,7 @@ the hooks which mission a session belongs to and feeds the status line badge.
 
 A "step" is one autonomous turn: each time Claude would stop while tasks remain, the Stop hook counts one and asks it to
 continue. The mission pauses on the step cap (or, with --until-usage, when plan usage reaches that percentage), on critical plan
-usage, or after three steps without progress. While `thanos wait` is active the Stop hook lets Claude stop without counting a step."""
+usage, or after three steps without progress. """
 from __future__ import annotations
 
 import hashlib
@@ -32,6 +32,7 @@ from .core import Workspace, batch_repos, die, git, git_ok, git_out, need_batch
 from .usage import cache_dir
 
 UNTIL_USAGE_STEPS = 10000
+MAX_WAITS = 30
 DEFAULTS = {"max_steps": 30, "max_opus": 3, "push_every": 3, "stale_hours": 12}
 SIZES = {"S": 2, "M": 4, "L": 8}
 LEDGER, STATE = "THANOS.md", ".thanos.json"
@@ -168,7 +169,7 @@ def _mark_done(batch_path: Path, name: str) -> bool:
     except OSError:
         return False
     for t in tasks(batch_path):
-        if t["mark"] == " " and re.match(rf"^{re.escape(name)}\b", t["text"]):
+        if t["mark"] == " " and re.match(rf"^{re.escape(name)}(?![\w-])", t["text"]):
             lines[t["line"]] = lines[t["line"]].replace("[ ]", "[x]", 1)
             path.write_text("\n".join(lines) + "\n")
             return True
@@ -414,7 +415,7 @@ def _park(batch_path: Path, name: str) -> bool:
     except OSError:
         return False
     for t in tasks(batch_path):
-        if t["mark"] == " " and re.match(rf"^{re.escape(name)}\b", t["text"]):
+        if t["mark"] == " " and re.match(rf"^{re.escape(name)}(?![\w-])", t["text"]):
             lines[t["line"]] = lines[t["line"]].replace("[ ]", "[!]", 1)
             path.write_text("\n".join(lines) + "\n")
             return True
@@ -456,9 +457,12 @@ def _wait(ws: Workspace, args: list[str]) -> int:
     except ValueError:
         die("usage: thanos wait [MINUTES]")
     minutes = max(1.0, min(minutes, 60.0))
+    st["waits"] = st.get("waits", 0) + 1
+    if st["waits"] > MAX_WAITS:
+        die(f"thanos wait was used {MAX_WAITS} times in this mission: a mission that keeps waiting is not making progress; finish, pause or stop it")
     st["waiting_until"] = time.time() + minutes * 60
     _save(bp, st)
-    print(f"waiting for a background agent for up to {num_str(minutes)} minute(s): stops in that window do not count as steps. End your turn; its notification will wake you.")
+    print(f"waiting for a background agent for up to {num_str(minutes)} minute(s): your next stop does not count as a step ({st['waits']}/{MAX_WAITS} waits used). End your turn; its notification will wake you.")
     return 0
 
 
@@ -527,22 +531,34 @@ def hook_stop() -> int:
         return 0
 
 
-def usage_used(ws: Workspace) -> float:
-    """Highest used percentage of the 5h and 7d plan windows in the usage snapshot (0 when unknown)."""
+def usage_used(ws: Workspace) -> float | None:
+    """Highest used percentage of the 5h and 7d plan windows in the usage snapshot; None when there is no usable data."""
     from .usage import evaluate, snapshot_path
     try:
         ev = evaluate(json.loads(snapshot_path().read_text()), time.time(), 70, 90, 0)
     except (OSError, ValueError, KeyError):
-        return 0.0
-    return max([w["used"] for w in (ev["session"], ev["week"]) if w.get("state") == "active"] or [0.0])
+        return None
+    known = [w["used"] for w in (ev["session"], ev["week"]) if w.get("state") == "active"]
+    return max(known) if known else None
 
 
 def _stop_step(m: dict) -> int:
     from .handoff import usage_level
     ws, bp = Workspace(Path(m["root"])), Path(m["batch_path"])
     st = _load(bp)
-    if st.get("waiting_until", 0) > time.time():
-        return 0   # waiting for a background agent: let Claude stop, count nothing, keep the mission working
+    until = st.get("until_usage") or 0
+    waiting = st.get("waiting_until", 0) > time.time()
+    if waiting:
+        # `thanos wait` buys exactly one uncounted stop (the one that waits for the background agent). Plan usage is
+        # still enforced, and the next stop after the notification wakes Claude is a normal, counted step.
+        used = usage_used(ws)
+        if usage_level(ws) >= 2 or (until and used is not None and used >= until):
+            st["waiting_until"] = 0
+            _save(bp, st)
+        else:
+            st["waiting_until"] = 0
+            _save(bp, st)
+            return 0
     st["steps"] += 1
     sig = _signature(ws, st["batch"], bp)
     st["stalls"] = st["stalls"] + 1 if sig == st.get("signature") else 0
@@ -550,10 +566,11 @@ def _stop_step(m: dict) -> int:
     ts = tasks(bp)
     todo = [t for t in ts if t["mark"] == " "]
     pause = ""
-    until = st.get("until_usage") or 0
     if usage_level(ws) >= 2:
         pause = "plan usage is critical"
-    elif until and (used := usage_used(ws)) >= until:
+    elif until and (used := usage_used(ws)) is None:
+        pause = f"there is no plan usage data to enforce --until-usage {num_str(until)} (is the status line running?)"
+    elif until and used >= until:
         pause = f"plan usage reached {used:.0f}% (the ceiling is {num_str(until)}%)"
     elif st["steps"] > st["max_steps"]:
         pause = f"the step cap ({st['max_steps']}) was reached"

@@ -17,7 +17,7 @@ Closing an issue is visible to others, so it is done only when the user asks, an
    - **Partial**: part is done; list what is not.
    - **Not touched**: say nothing.
    Parts that depend on another team or system (an ERP field, a decision) are *not done*, even if the POS side is.
-3. **Show the user the table** (number, title, verdict, one-line reason) and ask once, with `AskUserQuestion`, only if a verdict is arguable. Otherwise go on.
+3. **Show the user the table** (number, title, verdict, one-line reason) and get one yes with `AskUserQuestion` before writing anything: closing and commenting are visible to others. Change a verdict if they disagree.
 4. **Write the comments**, in the issue's language, short and factual:
    - Done: `gh issue close <n> --reason completed --comment "Done in #<pr>: <what was delivered, and any known limit>"`.
    - Partial: `gh issue comment <n> --body "Progress in #<pr>: <done>. Still open: <what is missing and why>"`. Leave it open.

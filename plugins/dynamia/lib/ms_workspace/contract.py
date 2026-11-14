@@ -18,7 +18,7 @@ from .core import Workspace, die
 
 EXTENSIONS = (".kt", ".java", ".groovy", ".ts", ".tsx")
 PRUNE = {".git", "node_modules", "target", "build", "dist", ".gradle", ".idea", ".nuxt", ".output", ".dynamia", "working-trees", ".batches", "out"}
-KINDS = r"(?:data\s+class|enum\s+class|sealed\s+class|abstract\s+class|class|record|interface|enum|type)"
+KINDS = r"(?:data\s+class|enum\s+class|sealed\s+class|abstract\s+class|class|record|interface|enum|object|typealias|type)"
 DEFAULT_MAX = 80
 CANDIDATES = 12
 
@@ -60,6 +60,8 @@ def search(roots: list[tuple[str, Path]], name: str, max_lines: int) -> tuple[li
                 except OSError:
                     continue
                 for i, line in enumerate(lines):
+                    if re.match(r"\s*(import|export\s*\{|//|\*|/\*)", line):
+                        continue   # `import type X from ...` and comments are not declarations
                     if exact.search(line):
                         rel = path.relative_to(root)
                         hits.append(f"{repo}/{rel}:{i + 1}\n" + "\n".join(declaration(exact, lines, i, max_lines)))

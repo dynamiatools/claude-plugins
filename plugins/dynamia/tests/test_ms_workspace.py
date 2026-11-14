@@ -305,6 +305,14 @@ class TestRunner(Base):
         self.assertIn("vitest run", r.stderr)
         self.assertIn('unit = "pnpm test"', r.stderr)
 
+    def test_no_warning_when_the_root_test_script_is_itself_recursive(self):
+        self.ws.set_toml(DEFAULT_TOML.replace('unit = "echo unit-lib"', 'unit = "echo pnpm -r test"'))
+        d = self.ws.batch("b1")
+        self.ws.commit(d / "lib", "root", {"package.json": json.dumps({"scripts": {"test": "pnpm -r test"}})})
+        r = self.ws.ms("test", "t0", cwd=d / "lib")
+        self.assertOk(r)
+        self.assertNotIn("WARN", r.stderr)
+
     def test_t0_fail_returns_code_and_shows_output(self):
         self.ws.set_toml(DEFAULT_TOML.replace('unit = "echo unit-lib"', 'unit = "echo boom-line; exit 3"'))
         d = self.ws.batch("b1")
@@ -2227,6 +2235,8 @@ class TestPrMode(Base):
         self.assertNotIn("feature", self.ws.remote_log("lib"), "pr mode must not touch the base branch")
         call = (self.ws.tmp / "gh-calls").read_text()
         self.assertIn("pr create --base next --head feat/b1", call)
+        self.assertIn("The PR is open: merge it", r.stdout)
+        self.assertIn("ms-workspace merge b1 --yes", r.stdout)
 
     def test_pr_flag_opens_a_pr_even_when_the_repo_pushes_directly(self):
         self.ws.set_toml(DEFAULT_TOML)   # lib is "direct" here
@@ -3835,8 +3845,9 @@ class TestProcesses(Base):
     def test_kill_hint_names_the_tmux_session_and_ignores_other_processes(self):
         sys.path.insert(0, str(REPO / "lib"))
         from ms_workspace.procs import kill_hint
-        self.assertEqual(kill_hint("tmux new-session -d -s next -n next -c /w claude --name x"), "end the tmux session with: tmux kill-session -t next")
-        self.assertEqual(kill_hint("/usr/bin/tmux new -s api"), "end the tmux session with: tmux kill-session -t api")
+        self.assertTrue(kill_hint("tmux new-session -d -s next -n next -c /w claude --name x").startswith("end the tmux session with: tmux kill-session -t next"))
+        self.assertTrue(kill_hint("/usr/bin/tmux new -s api").startswith("end the tmux session with: tmux kill-session -t api"))
+        self.assertIn("ends it too", kill_hint("tmux new -s api"))
         self.assertEqual(kill_hint("claude --name dev"), "")
         self.assertEqual(kill_hint("sleep 300"), "")
 
@@ -4984,7 +4995,7 @@ class TestMerge(Base):
         self.ws.commit(d / "lib", "feature", {"f.txt": "1"})
         self.bin = self.ws.tmp / "mergebin"
         self.bin.mkdir()
-        for tool in ("git", "python3", "bash", "cat"):
+        for tool in ("git", "python3", "bash", "cat", "basename"):
             real = subprocess.run(["which", tool], capture_output=True, text=True).stdout.strip()
             (self.bin / tool).symlink_to(real)
         self.state = self.ws.tmp / "gh-state"
@@ -4995,9 +5006,9 @@ class TestMerge(Base):
         gh.write_text(f"""#!/bin/sh
 echo "$@" >> "{self.ws.tmp}/gh-calls"
 case "$1 $2" in
-  "pr list") printf '[{{"number": 7, "url": "https://github.com/acme/lib/pull/7", "state": "%s", "mergeable": "MERGEABLE"}}]' "$(cat {self.state})" ;;
+  "pr list") printf '[{{"number": 7, "url": "https://github.com/acme/lib/pull/7", "state": "%s", "mergeable": "MERGEABLE", "headRefOid": "abc123"}}]' "$(cat {self.state})" ;;
   "pr checks") cat {self.checks} ;;
-  "pr merge") git push origin HEAD:next >/dev/null 2>&1; echo MERGED > {self.state} ;;
+  "pr merge") git push origin feat/b1:next >/dev/null 2>&1; echo MERGED > {self.state} ;;
 esac
 """)
         gh.chmod(0o755)
@@ -5017,7 +5028,7 @@ esac
     def test_yes_merges_with_the_chosen_method_and_updates_the_base_checkout(self):
         r = self.ws.ms("merge", "b1", "--yes", "--method", "squash", env=self.env)
         self.assertOk(r)
-        self.assertIn("pr merge 7 --squash", self.calls())
+        self.assertIn("pr merge 7 --squash --match-head-commit abc123", self.calls())
         self.assertIn("merged PR #7 (squash)", r.stdout)
         self.assertIn("next fast-forwarded to origin/next", r.stdout)
         self.assertTrue((self.ws.project / "lib" / "f.txt").is_file() if self.ws.dynamia else (self.ws.root / "lib" / "f.txt").is_file())
@@ -5034,6 +5045,44 @@ esac
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("still pending after 0s", r.stderr)
         self.assertNotIn("pr merge", self.calls())
+
+    def test_a_gh_error_is_never_read_as_green_and_no_checks_need_an_explicit_ok(self):
+        gh = self.bin / "gh"
+        original = gh.read_text()
+        # gh fails (auth/network): no JSON, an error on stderr
+        gh.write_text(original.replace('"pr checks") cat ' + str(self.checks) + ' ;;', '"pr checks") echo "HTTP 401: bad credentials" >&2; exit 1 ;;'))
+        r = self.ws.ms("merge", "b1", "--yes", env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("gh pr checks failed", r.stderr)
+        self.assertIn("HTTP 401", r.stderr)
+        self.assertNotIn("pr merge", self.calls())
+        # the PR has no checks at all (or CI has not started): refuse unless told it is fine
+        gh.write_text(original.replace('"pr checks") cat ' + str(self.checks) + ' ;;', '"pr checks") echo "no checks reported on the feat/b1 branch" >&2; exit 1 ;;'))
+        r = self.ws.ms("merge", "b1", "--yes", "--wait", "0", env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no checks were reported", r.stderr)
+        self.assertNotIn("pr merge", self.calls())
+        r = self.ws.ms("merge", "b1", "--yes", "--no-checks-ok", env=self.env)
+        self.assertOk(r)
+        self.assertIn("pr merge 7", self.calls())
+
+    def test_a_failure_in_one_repo_merges_nothing_and_the_batch_worktree_is_not_needed(self):
+        d = self.ws.batch("b2", "lib", "app")
+        for repo in ("lib", "app"):
+            self.ws.commit(d / repo, "change", {f"{repo}.txt": "1"})
+        gh = self.bin / "gh"
+        gh.write_text(f"""#!/bin/sh
+echo "$(basename "$PWD") $@" >> "{self.ws.tmp}/gh-calls"
+n=7; [ "$(basename "$PWD")" = app ] && n=8
+case "$1 $2" in
+  "pr list") printf '[{{"number": %s, "url": "https://github.com/acme/x/pull/%s", "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "h%s"}}]' $n $n $n ;;
+  "pr checks") if [ "$n" = 8 ]; then echo '[{{"name":"t","bucket":"fail"}}]'; exit 1; else echo '[{{"name":"t","bucket":"pass"}}]'; fi ;;
+esac
+""")
+        r = self.ws.ms("merge", "b2", "--yes", env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("1 check(s) failed", r.stderr)
+        self.assertNotIn("pr merge", self.calls(), "the lib PR must not be merged while app is red")
 
     def test_an_already_merged_pr_only_updates_the_base_and_a_missing_pr_is_reported(self):
         self.state.write_text("MERGED")
@@ -5197,19 +5246,37 @@ class TestThanos(Base):
             "captured_at": now, "five_hour": {"used_percentage": p5, "resets_at": now + 3 * 3600},
             "seven_day": {"used_percentage": p7, "resets_at": now + 4 * 86400}}))
 
-    def test_wait_lets_the_stop_hook_stop_without_counting_steps(self):
+    def test_wait_buys_exactly_one_uncounted_stop(self):
         d = self.start("--max-steps", "5")
         self.tasks(d, "- [ ] [S] first: do it")
         r = self.ws.ms("thanos", "wait", "5", cwd=d / "lib")
         self.assertOk(r)
-        self.assertIn("do not count as steps", r.stdout)
-        for _ in range(4):
-            self.assertEqual(self.hook("thanos stop-hook", {}).stdout.strip(), "", "stops while waiting are silent")
+        self.assertIn("next stop does not count", r.stdout)
+        self.assertEqual(self.hook("thanos stop-hook", {}).stdout.strip(), "", "the stop that waits for the agent is silent")
         self.assertEqual(self.state(d)["steps"], 0)
+        out = json.loads(self.hook("thanos stop-hook", {}).stdout)   # woken by the notification and stopping again: counted
+        self.assertIn("step 1/5", out["reason"])
+
+    def test_wait_never_exempts_the_usage_checks_and_is_capped(self):
+        d = self.start("--until-usage", "80")
+        self.tasks(d, "- [ ] [S] first: do it")
+        self.write_usage(90)
+        self.assertOk(self.ws.ms("thanos", "wait", "5", cwd=d / "lib"))
+        out = json.loads(self.hook("thanos stop-hook", {}).stdout)
+        self.assertIn("THANOS paused: plan usage", out["systemMessage"], "a wait cannot hide a usage ceiling")
         st = self.state(d)
-        st["waiting_until"] = time.time() - 1   # the window is over: counting resumes
+        st["status"], st["waits"] = "working", 30
         (d / ".thanos.json").write_text(json.dumps(st))
-        self.assertIn("step 1/5", json.loads(self.hook("thanos stop-hook", {}).stdout)["reason"])
+        r = self.ws.ms("thanos", "wait", "5", cwd=d / "lib")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("used 30 times", r.stderr)
+
+    def test_until_usage_without_usage_data_pauses_instead_of_running_unbounded(self):
+        d = self.start("--until-usage", "80")
+        self.tasks(d, "- [ ] [S] first: do it")
+        out = json.loads(self.hook("thanos stop-hook", {}).stdout)
+        self.assertIn("no plan usage data", out["systemMessage"])
+        self.assertEqual(self.state(d)["status"], "paused")
 
     def test_until_usage_replaces_the_step_cap_with_a_usage_ceiling(self):
         d = self.start("--until-usage", "80")
@@ -5253,6 +5320,11 @@ class TestThanos(Base):
         for cmd in ("gh issue view 12 --json body", "gh issue list --state open", "gh pr checks 5", "gh pr view 5", "gh run list"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.decision(self.bash(cmd, d / "lib")), "allow", cmd)
+        for cmd in ("gh pr view 5 --web=true", "gh pr view 5 -cw", "gh issue list -w", "GH_BROWSER='sh -c x' gh pr view 5 --web=true",
+                    "GH_PAGER=evil gh pr diff 5", "env GH_PAGER=x gh pr diff 5", "GIT_EXTERNAL_DIFF=evil git diff", "PAGER=evil git log", "BROWSER=evil gh pr view 5"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.bash(cmd, d / "lib").returncode, 2, cmd)
+        self.assertEqual(self.decision(self.bash("CI=1 pnpm test", d / "lib")), "allow", "ordinary variables stay fine")
         for cmd in ("gh pr create --fill", "gh pr merge 5", "gh issue close 3", "gh issue comment 3 -b x", "gh pr view 5 --web", "gh api -X POST /x", "gh release create v1"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.bash(cmd, d / "lib").returncode, 2, cmd)

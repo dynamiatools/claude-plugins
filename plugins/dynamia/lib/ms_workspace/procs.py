@@ -28,7 +28,7 @@ def kill_hint(cmd: str) -> str:
     """How to end a protected process `ps kill` refuses: a tmux session is ended by name, not by pid."""
     m = re.search(r"(^|/)tmux\b.*?(?:new-session|new|attach|attach-session)\b.*?\s-s\s+(\S+)", cmd)
     if m:
-        return f"end the tmux session with: tmux kill-session -t {m.group(2)}"
+        return f"end the tmux session with: tmux kill-session -t {m.group(2)} (if it hosts your current Claude session, that ends it too)"
     return ""
 
 

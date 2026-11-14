@@ -34,6 +34,10 @@ GIT_SAFE = {"status", "diff", "log", "show", "add", "commit", "rev-parse", "rev-
             "describe", "merge", "cherry-pick", "rebase", "fetch", "switch", "tag", "grep", "diff-tree", "merge-base", "show-ref",
             "for-each-ref", "name-rev", "bisect", "apply", "am", "mv", "merge-tree", "count-objects", "check-ignore", "ls-remote", "version"}
 GIT_NEVER = {"gc", "prune", "filter-branch", "filter-repo", "replace", "send-pack", "svn", "fast-import"}
+# Variables that make a command run another command (pagers, browsers, editors, ssh/askpass helpers, loader hooks): refused in any form.
+DANGEROUS_ENV = re.compile(r"^(GH_BROWSER|GH_PAGER|GH_EDITOR|BROWSER|PAGER|GIT_PAGER|GIT_EXTERNAL_DIFF|GIT_SSH_COMMAND|GIT_SSH|GIT_ASKPASS|"
+                           r"SSH_ASKPASS|GIT_EDITOR|GIT_PROXY_COMMAND|EDITOR|VISUAL|LD_PRELOAD|LD_LIBRARY_PATH|BASH_ENV|PROMPT_COMMAND|PATH|SHELL|"
+                           r"GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS)=")
 GH_READ = {"issue": {"view", "list", "status"}, "pr": {"view", "list", "checks", "diff", "status"}, "repo": {"view"},
            "run": {"view", "list"}, "release": {"view", "list"}}
 MS_SAFE = {"status", "log", "usage", "plan", "test", "integrate", "affected", "context", "memory", "recall", "doctor", "gate", "budget",
@@ -163,6 +167,9 @@ def _ms(words: list[str], args: list[str]) -> tuple[str, str]:
 
 def _classify(seg: list[str], m: dict, cwd: str, moved: bool, deny: list[str]) -> tuple[str, str, str, bool]:
     """(kind, reason, new cwd, moved) for one command."""
+    for t in seg:
+        if DANGEROUS_ENV.match(t):
+            return "block", f"{t.split('=')[0]} can make a command run another command", cwd, moved
     raw = [t for t in seg if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t)]
     if raw and os.path.basename(raw[0]) in NEVER:
         return "block", f"{os.path.basename(raw[0])}: no privilege escalation", cwd, moved
@@ -191,7 +198,8 @@ def _classify(seg: list[str], m: dict, cwd: str, moved: bool, deny: list[str]) -
             return "unknown", "", cwd, True
         new = os.path.realpath(os.path.expanduser(target) if os.path.isabs(os.path.expanduser(target)) else os.path.join(cwd, target))
         return "safe", "", new, moved
-    if prog == "gh" and len(words) >= 2 and words[1] in GH_READ.get(words[0], ()) and "--web" not in args and "-w" not in args:
+    web = any(a.startswith("--web") or (a.startswith("-") and not a.startswith("--") and "w" in a[1:]) for a in args)   # --web, --web=true, -w, -cw
+    if prog == "gh" and len(words) >= 2 and words[1] in GH_READ.get(words[0], ()) and not web:
         return "safe", "", cwd, moved   # read-only lookups (issue text, PR state, CI checks) do not publish anything
     if prog in REMOTE:
         return "block", f"{prog} reaches machines or services outside the batch", cwd, moved
