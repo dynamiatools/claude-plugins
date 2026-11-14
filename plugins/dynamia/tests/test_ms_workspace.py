@@ -3788,6 +3788,21 @@ class TestProcesses(Base):
         p.wait(timeout=5)
         self.assertOk(self.ws.ms("clean", "b1"))
 
+    def test_kill_hint_names_the_tmux_session_and_ignores_other_processes(self):
+        sys.path.insert(0, str(REPO / "lib"))
+        from ms_workspace.procs import kill_hint
+        self.assertEqual(kill_hint("tmux new-session -d -s next -n next -c /w claude --name x"), "end the tmux session with: tmux kill-session -t next")
+        self.assertEqual(kill_hint("/usr/bin/tmux new -s api"), "end the tmux session with: tmux kill-session -t api")
+        self.assertEqual(kill_hint("claude --name dev"), "")
+        self.assertEqual(kill_hint("sleep 300"), "")
+
+    def test_the_tmux_script_starts_the_server_in_the_project_folder_and_the_skill_uses_its_own_path(self):
+        script = (REPO / "skills" / "tmux-session" / "scripts" / "claude-tmux.sh").read_text()
+        self.assertLess(script.index('cd "$SUB_DIR"'), script.index("tmux new-session"))
+        skill = (REPO / "skills" / "tmux-session" / "SKILL.md").read_text()
+        self.assertNotIn("bash ~/.claude/skills", skill)
+        self.assertIn("Base directory for this", skill)
+
     def test_force_clean_warns_but_proceeds(self):
         d = self.ws.batch("b1", "lib")
         p = self.sleeper(cwd=d / "lib")

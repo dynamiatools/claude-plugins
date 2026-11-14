@@ -621,7 +621,10 @@ def cmd_clean(ws: Workspace, args: list[str]) -> int:
     if running:
         listing = "; ".join(f"{pid} ({cmd})" for pid, cmd in running[:5])
         if not force:
-            die(f"processes are still running inside the batch: {listing}. Stop them (ms-workspace ps kill <pid> --yes) or use --force")
+            from .procs import kill_hint
+            hints = sorted({h for _, cmd in running if (h := kill_hint(cmd))})
+            how = ("; ".join(hints) + " (ps kill refuses protected processes such as tmux)") if hints else "Stop them (ms-workspace ps kill <pid> --yes)"
+            die(f"processes are still running inside the batch: {listing}. {how}, or use --force")
         eprint(f"warning: removing the batch while these processes run in it: {listing}")
     flags = ["--force"] if force else []
     for r in repos:
