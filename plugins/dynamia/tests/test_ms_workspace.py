@@ -4921,6 +4921,61 @@ class TestPromote(Base):
         self.assertEqual(self.remote("main"), before)
 
 
+# --------------------------------------------------------------------- contract
+class TestContract(Base):
+    def setUp(self):
+        super().setUp()
+        lib, app = self.ws.root / "lib", self.ws.root / "app"
+        (lib / "src").mkdir(parents=True)
+        (lib / "src" / "SalesDTOs.kt").write_text(textwrap.dedent("""\
+            package x
+
+            data class SaleItemDTO(
+                val id: Long? = null,
+                val presentationId: Long? = null,
+                val notes: String? = null,
+                val subItems: List<SaleItemDTO> = emptyList()
+            )
+
+            data class SaleDTO(
+                val id: Long? = null,
+                val items: List<SaleItemDTO> = emptyList()
+            )
+            """))
+        (app / "src").mkdir(parents=True)
+        (app / "src" / "Quote.java").write_text("public record Quote(String code, int qty) {\n}\n")
+        (app / "node_modules" / "x").mkdir(parents=True)
+        (app / "node_modules" / "x" / "Ghost.ts").write_text("export interface SaleDTO { ghost: true }\n")
+
+    def test_prints_the_declaration_with_its_fields_and_skips_dependency_folders(self):
+        r = self.ws.ms("contract", "SaleDTO")
+        self.assertOk(r)
+        self.assertIn("lib/src/SalesDTOs.kt:10", r.stdout)
+        self.assertIn("val items: List<SaleItemDTO> = emptyList()", r.stdout)
+        self.assertNotIn("presentationId", r.stdout, "only the asked type, not its neighbour")
+        self.assertNotIn("ghost", r.stdout)
+
+    def test_a_java_record_and_the_repo_filter(self):
+        r = self.ws.ms("contract", "Quote", "--repo", "app")
+        self.assertOk(r)
+        self.assertIn("app/src/Quote.java:1", r.stdout)
+        self.assertIn("record Quote(String code, int qty)", r.stdout)
+        self.assertNotEqual(self.ws.ms("contract", "SaleDTO", "--repo", "app").returncode, 0)
+
+    def test_unknown_names_list_similar_ones_and_bad_input_is_rejected(self):
+        r = self.ws.ms("contract", "SaleItem")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("similar names", r.stdout)
+        self.assertIn("SaleItemDTO", r.stdout)
+        for bad in (["Sale DTO"], [], ["SaleDTO", "--max-lines", "x"], ["SaleDTO", "--bogus"], ["SaleDTO", "--repo", "nope"]):
+            with self.subTest(bad=bad):
+                self.assertNotEqual(self.ws.ms("contract", *bad).returncode, 0)
+
+    def test_the_declaration_is_capped(self):
+        r = self.ws.ms("contract", "SaleItemDTO", "--max-lines", "3")
+        self.assertIn("cut at 3 lines", r.stdout)
+
+
 # --------------------------------------------------------------------- merge
 class TestMerge(Base):
     def setUp(self):
