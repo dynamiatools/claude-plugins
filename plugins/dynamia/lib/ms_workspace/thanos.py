@@ -1,11 +1,12 @@
 """THANOS: an autonomous mission inside its own batch worktree.
 
-    ms-workspace thanos start <batch> [--goal T] [--max-steps N] [--max-opus N] [--push-every N] [--deny-host H]
+    ms-workspace thanos start <batch> [--goal T] [--max-steps N | --until-usage PCT] [--max-opus N] [--opus-used N] [--push-every N] [--deny-host H]
     ms-workspace thanos resume <batch>            re-attach this session to a mission that is still working
     ms-workspace thanos estimate <batch>          steps the task list in THANOS.md needs, and the cap that would be used
     ms-workspace thanos status [batch]            one line: status, steps, tasks, Opus reviews
     ms-workspace thanos task start|done <name>    a branch per task, merged into the batch branch when it is done
-    ms-workspace thanos block "<what and why>"    record something the guard refused, then move on
+    ms-workspace thanos block [--task NAME] "<what and why>"   record something the guard refused (and park that task [!]), then move on
+    ms-workspace thanos wait [MINUTES]            waiting for a background agent: the next stop is not counted as a step (plan usage is still enforced)
     ms-workspace thanos pause "<why>" | done [--force] | stop
     ms-workspace thanos stop-hook | context       hooks (Stop, SessionStart)
     ms-workspace thanosguard                      hook (PreToolUse for Edit, Write and Agent)
@@ -15,7 +16,8 @@ and <batch>/.thanos.json (counters and limits, written only by this tool). A poi
 the hooks which mission a session belongs to and feeds the status line badge.
 
 A "step" is one autonomous turn: each time Claude would stop while tasks remain, the Stop hook counts one and asks it to
-continue. The mission pauses on the step cap, on critical plan usage, or after three steps without progress."""
+continue. The mission pauses on the step cap (or, with --until-usage, when plan usage reaches that percentage), on critical plan
+usage, or after three steps without progress. """
 from __future__ import annotations
 
 import hashlib
@@ -29,6 +31,8 @@ from pathlib import Path
 from .core import Workspace, batch_repos, die, git, git_ok, git_out, need_batch
 from .usage import cache_dir
 
+UNTIL_USAGE_STEPS = 10000
+MAX_WAITS = 30
 DEFAULTS = {"max_steps": 30, "max_opus": 3, "push_every": 3, "stale_hours": 12}
 SIZES = {"S": 2, "M": 4, "L": 8}
 LEDGER, STATE = "THANOS.md", ".thanos.json"
@@ -165,7 +169,7 @@ def _mark_done(batch_path: Path, name: str) -> bool:
     except OSError:
         return False
     for t in tasks(batch_path):
-        if t["mark"] == " " and re.match(rf"^{re.escape(name)}\b", t["text"]):
+        if t["mark"] == " " and re.match(rf"^{re.escape(name)}(?![\w-])", t["text"]):
             lines[t["line"]] = lines[t["line"]].replace("[ ]", "[x]", 1)
             path.write_text("\n".join(lines) + "\n")
             return True
@@ -237,13 +241,17 @@ def cmd_thanos(ws: Workspace | None, args: list[str]) -> int:
     if ws is None:
         die("THANOS needs a workspace (run the dynamia:workspace-init skill first)")
     handler = {"start": _start, "resume": _resume, "estimate": _estimate, "status": _status, "task": _task, "block": _block,
-               "pause": _pause, "done": _done, "stop": _stop}.get(sub)
+               "wait": _wait, "pause": _pause, "done": _done, "stop": _stop}.get(sub)
     if handler is None:
-        die("usage: thanos start|resume|estimate|status|task|block|pause|done|stop (see ms-workspace help)")
+        die("usage: thanos start|resume|estimate|status|task|block|wait|pause|done|stop (see ms-workspace help)")
     return handler(ws, rest)
 
 
-VALUE_FLAGS = {"--goal", "--max-steps", "--max-opus", "--push-every", "--deny-host"}
+VALUE_FLAGS = {"--goal", "--max-steps", "--max-opus", "--opus-used", "--until-usage", "--push-every", "--deny-host", "--task"}
+
+
+def num_str(x: float) -> str:
+    return str(int(x)) if float(x) == int(x) else str(x)
 
 
 def _positional(args: list[str]) -> list[str]:
@@ -279,13 +287,18 @@ def _start(ws: Workspace, args: list[str]) -> int:
     from .batches import int_branch
     goal = _opt(args, "--goal", "(write the goal here)")
     steps_est, n_tasks = estimate(bp)
-    max_steps = _opt(args, "--max-steps", cfg(ws, "max_steps"), int)
+    until = _opt(args, "--until-usage", 0, float)
+    if until and not 1 <= until <= 100:
+        die("--until-usage is a plan usage percentage between 1 and 100")
+    # With a usage ceiling the step cap only guards against a runaway loop: the usage percentage is the real limit.
+    max_steps = _opt(args, "--max-steps", UNTIL_USAGE_STEPS if until else cfg(ws, "max_steps"), int)
     max_opus = _opt(args, "--max-opus", cfg(ws, "max_opus"), int)
-    if max_steps < 1 or max_opus < 0:
-        die("--max-steps must be at least 1 and --max-opus 0 or more")
+    opus_used = _opt(args, "--opus-used", 0, int)
+    if max_steps < 1 or max_opus < 0 or not 0 <= opus_used <= max_opus:
+        die("--max-steps must be at least 1, --max-opus 0 or more and --opus-used between 0 and --max-opus")
     deny = [args[i + 1] for i, a in enumerate(args) if a == "--deny-host" and i + 1 < len(args)] + list(ws.get("thanos", "deny_hosts", default=[]))
     st = {"batch": batch, "branch": int_branch(ws, batch, repos[0]), "goal": goal, "status": "working", "started": int(time.time()),
-          "steps": 0, "max_steps": max_steps, "opus_used": 0, "max_opus": max_opus, "push_every": _opt(args, "--push-every", cfg(ws, "push_every"), int),
+          "steps": 0, "max_steps": max_steps, "opus_used": opus_used, "max_opus": max_opus, "until_usage": until, "push_every": _opt(args, "--push-every", cfg(ws, "push_every"), int),
           "tasks_done": 0, "stalls": 0, "signature": "", "deny_hosts": deny, "stale_hours": cfg(ws, "stale_hours"), "blockers": 0}
     _save(bp, st)
     if not ledger_path(bp).is_file():
@@ -294,8 +307,9 @@ def _start(ws: Workspace, args: list[str]) -> int:
     _attach(sid, bp, ws.root, "working")
     ws.log("thanos.start", "ok", "", batch, f"max_steps={max_steps} max_opus={max_opus}")
     print(f"THANOS mission started in {bp}")
-    print(f"  cap: {max_steps} steps, {max_opus} Opus reviews, push of the batch branch every {st['push_every'] or 'never'} task(s)")
-    if n_tasks and steps_est > max_steps:
+    print(f"  cap: {'plan usage ' + num_str(until) + '%' if until else str(max_steps) + ' steps'}, {max_opus} Opus reviews ({opus_used} already used), "
+          f"push of the batch branch every {st['push_every'] or 'never'} task(s)")
+    if n_tasks and not until and steps_est > max_steps:
         print(f"  warning: the open tasks are estimated at {steps_est} steps, above the cap of {max_steps}; raise it with --max-steps or trim the plan")
     if not sid:
         print("  note: this session could not be linked (no hook saw the start): the strict guard and the status badge need the hooks installed")
@@ -393,17 +407,62 @@ def _task(ws: Workspace, args: list[str]) -> int:
     return 0
 
 
+def _park(batch_path: Path, name: str) -> bool:
+    """Mark the open task `name` as parked ([!]) in the ledger."""
+    path = ledger_path(batch_path)
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return False
+    for t in tasks(batch_path):
+        if t["mark"] == " " and re.match(rf"^{re.escape(name)}(?![\w-])", t["text"]):
+            lines[t["line"]] = lines[t["line"]].replace("[ ]", "[!]", 1)
+            path.write_text("\n".join(lines) + "\n")
+            return True
+    return False
+
+
 def _block(ws: Workspace, args: list[str]) -> int:
-    text = " ".join(args).strip()
+    task = _opt(args, "--task", "")
+    words, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+        elif a == "--task":
+            skip = True
+        else:
+            words.append(a)
+    text = " ".join(words).strip()
     if not text:
-        die('usage: thanos block "<what was refused and why>"')
+        die('usage: thanos block [--task NAME] "<what was refused and why>"')
     bp = _find_batch(ws, [])
     st = _load(bp)
     st["blockers"] += 1
     _save(bp, st)
     _append_section(bp, "Blockers", f"- {time.strftime('%H:%M')} {text}")
     ws.log("thanos.block", "ok", "", st["batch"], text[:120])
-    print("recorded; park the task (mark it [!]) and continue with another one")
+    if task:
+        print(f"recorded; task {task} parked [!]" if _park(bp, task) else f"recorded; no open task named {task} in THANOS.md to park")
+    else:
+        print("recorded; park the task with 'thanos block --task NAME ...' (or mark it [!]) and continue with another one")
+    return 0
+
+
+def _wait(ws: Workspace, args: list[str]) -> int:
+    """Tell the Stop hook that Claude is only waiting for a background agent: stops are not steps until the time is up."""
+    bp = _find_batch(ws, [])
+    st = _load(bp)
+    try:
+        minutes = float(_positional(args)[0]) if _positional(args) else 10.0
+    except ValueError:
+        die("usage: thanos wait [MINUTES]")
+    minutes = max(1.0, min(minutes, 60.0))
+    st["waits"] = st.get("waits", 0) + 1
+    if st["waits"] > MAX_WAITS:
+        die(f"thanos wait was used {MAX_WAITS} times in this mission: a mission that keeps waiting is not making progress; finish, pause or stop it")
+    st["waiting_until"] = time.time() + minutes * 60
+    _save(bp, st)
+    print(f"waiting for a background agent for up to {num_str(minutes)} minute(s): your next stop does not count as a step ({st['waits']}/{MAX_WAITS} waits used). End your turn; its notification will wake you.")
     return 0
 
 
@@ -472,10 +531,34 @@ def hook_stop() -> int:
         return 0
 
 
+def usage_used(ws: Workspace) -> float | None:
+    """Highest used percentage of the 5h and 7d plan windows in the usage snapshot; None when there is no usable data."""
+    from .usage import evaluate, snapshot_path
+    try:
+        ev = evaluate(json.loads(snapshot_path().read_text()), time.time(), 70, 90, 0)
+    except (OSError, ValueError, KeyError):
+        return None
+    known = [w["used"] for w in (ev["session"], ev["week"]) if w.get("state") == "active"]
+    return max(known) if known else None
+
+
 def _stop_step(m: dict) -> int:
     from .handoff import usage_level
     ws, bp = Workspace(Path(m["root"])), Path(m["batch_path"])
     st = _load(bp)
+    until = st.get("until_usage") or 0
+    waiting = st.get("waiting_until", 0) > time.time()
+    if waiting:
+        # `thanos wait` buys exactly one uncounted stop (the one that waits for the background agent). Plan usage is
+        # still enforced, and the next stop after the notification wakes Claude is a normal, counted step.
+        used = usage_used(ws)
+        if usage_level(ws) >= 2 or (until and used is not None and used >= until):
+            st["waiting_until"] = 0
+            _save(bp, st)
+        else:
+            st["waiting_until"] = 0
+            _save(bp, st)
+            return 0
     st["steps"] += 1
     sig = _signature(ws, st["batch"], bp)
     st["stalls"] = st["stalls"] + 1 if sig == st.get("signature") else 0
@@ -485,6 +568,10 @@ def _stop_step(m: dict) -> int:
     pause = ""
     if usage_level(ws) >= 2:
         pause = "plan usage is critical"
+    elif until and (used := usage_used(ws)) is None:
+        pause = f"there is no plan usage data to enforce --until-usage {num_str(until)} (is the status line running?)"
+    elif until and used >= until:
+        pause = f"plan usage reached {used:.0f}% (the ceiling is {num_str(until)}%)"
     elif st["steps"] > st["max_steps"]:
         pause = f"the step cap ({st['max_steps']}) was reached"
     elif st["stalls"] >= 3:

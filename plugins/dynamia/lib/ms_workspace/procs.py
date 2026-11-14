@@ -24,6 +24,14 @@ class Proc:
                 f"{self.cmd[:90]}" + (f"  [{with_cwd}]" if with_cwd else ""))
 
 
+def kill_hint(cmd: str) -> str:
+    """How to end a protected process `ps kill` refuses: a tmux session is ended by name, not by pid."""
+    m = re.search(r"(^|/)tmux\b.*?(?:new-session|new|attach|attach-session)\b.*?\s-s\s+(\S+)", cmd)
+    if m:
+        return f"end the tmux session with: tmux kill-session -t {m.group(2)} (if it hosts your current Claude session, that ends it too)"
+    return ""
+
+
 def parse_etime(text: str) -> int:
     days, _, rest = text.partition("-") if "-" in text else ("0", "", text)
     parts = [int(x) for x in rest.split(":")]
@@ -278,7 +286,8 @@ def cmd_kill(ws, args: list[str]) -> int:
             print(f"  {pid}: refused, it belongs to {p.user}")
             bad = True
         elif PROTECTED.search(p.cmd):
-            print(f"  {pid}: refused, protected process ({p.cmd[:50]})")
+            hint = kill_hint(p.cmd)
+            print(f"  {pid}: refused, protected process ({p.cmd[:50]})" + (f"; {hint}" if hint else ""))
             bad = True
         elif not yes:
             print(f"  {pid}: would send {signame} to: {p.cmd[:90]}  (age {fmt_age(p.age)}, {p.rss / 1024:.0f}M)")

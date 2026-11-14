@@ -291,6 +291,28 @@ class TestRunner(Base):
         self.assertOk(r)
         self.assertIn("PASS t0 lib", r.stdout)
 
+    def test_a_green_pnpm_recursive_run_warns_when_the_root_has_its_own_test_script(self):
+        self.ws.set_toml(DEFAULT_TOML.replace('unit = "echo unit-lib"', 'unit = "echo pnpm -r test"'))
+        d = self.ws.batch("b1")
+        wt = d / "lib"
+        r = self.ws.ms("test", "t0", cwd=wt)
+        self.assertOk(r)
+        self.assertNotIn("WARN", r.stderr, "no root test script, nothing to skip")
+        self.ws.commit(wt, "root suite", {"package.json": json.dumps({"scripts": {"test": "vitest run"}})})
+        r = self.ws.ms("test", "t0", cwd=wt)
+        self.assertOk(r)
+        self.assertIn("WARN t0 lib", r.stderr)
+        self.assertIn("vitest run", r.stderr)
+        self.assertIn('unit = "pnpm test"', r.stderr)
+
+    def test_no_warning_when_the_root_test_script_is_itself_recursive(self):
+        self.ws.set_toml(DEFAULT_TOML.replace('unit = "echo unit-lib"', 'unit = "echo pnpm -r test"'))
+        d = self.ws.batch("b1")
+        self.ws.commit(d / "lib", "root", {"package.json": json.dumps({"scripts": {"test": "pnpm -r test"}})})
+        r = self.ws.ms("test", "t0", cwd=d / "lib")
+        self.assertOk(r)
+        self.assertNotIn("WARN", r.stderr)
+
     def test_t0_fail_returns_code_and_shows_output(self):
         self.ws.set_toml(DEFAULT_TOML.replace('unit = "echo unit-lib"', 'unit = "echo boom-line; exit 3"'))
         d = self.ws.batch("b1")
@@ -2213,6 +2235,8 @@ class TestPrMode(Base):
         self.assertNotIn("feature", self.ws.remote_log("lib"), "pr mode must not touch the base branch")
         call = (self.ws.tmp / "gh-calls").read_text()
         self.assertIn("pr create --base next --head feat/b1", call)
+        self.assertIn("The PR is open: merge it", r.stdout)
+        self.assertIn("ms-workspace merge b1 --yes", r.stdout)
 
     def test_pr_flag_opens_a_pr_even_when_the_repo_pushes_directly(self):
         self.ws.set_toml(DEFAULT_TOML)   # lib is "direct" here
@@ -2238,6 +2262,36 @@ class TestPrMode(Base):
         call = (self.ws.tmp / "gh-calls").read_text()
         self.assertIn("--title Add the feature --body Why this change exists", call)
         self.assertIn("unknown option", self.ws.ms("ship", "b1", "--bogus", env=env).stderr + self.ws.ms("ship", "b1", "--bogus", env=env).stdout)
+
+    def gh_with_url(self):
+        path = self.fake_path(True)
+        gh = Path(path) / "gh"
+        gh.write_text(f'#!/bin/sh\necho "$@" >> "{self.ws.tmp}/gh-calls"\necho "https://github.com/acme/lib/pull/42"\n')
+        gh.chmod(0o755)
+        return path
+
+    def test_the_pr_url_is_printed_logged_and_kept_in_the_ship_record(self):
+        r = self.ws.ms("ship", "b1", "--yes", "--skip-e2e", env={"PATH": self.gh_with_url()})
+        self.assertOk(r)
+        self.assertIn("pushed lib: PR https://github.com/acme/lib/pull/42", r.stdout)
+        self.assertIn("https://github.com/acme/lib/pull/42", self.ws.ms("log", "--action", "ship").stdout)
+        records = list((self.ws.root / ".ms-workspace" / "ship").glob("b1-*.json")) or list(self.ws.root.rglob("ship/b1-*.json"))
+        self.assertEqual(json.loads(records[0].read_text())["repos"]["lib"]["pr"], "https://github.com/acme/lib/pull/42")
+
+    def test_recommended_action_pr_opens_a_pr_for_big_changes_and_direct_still_wins(self):
+        self.ws.set_toml(DEFAULT_TOML + "[ship]\nrecommend_pr_new_files = 3\nrecommend_pr_files = 0\nrecommended_action = \"pr\"\n")
+        env = {"PATH": self.gh_with_url()}
+        d = self.ws.root / ".batches" / "b1" / "lib"
+        self.assertIn("(direct, 1 commits)", self.ws.ms("plan", "b1", env=env).stdout, "a small change keeps the configured mode")
+        self.ws.commit(d, "many", {f"n{i}.txt": "x\n" for i in range(4)})
+        plan = self.ws.ms("plan", "b1", env=env)
+        self.assertIn("(pr, 2 commits)", plan.stdout)
+        self.assertIn("PR chosen automatically", plan.stdout)
+        self.assertNotIn("RECOMMEND A PR", plan.stdout)
+        self.assertIn("(direct, 2 commits)", self.ws.ms("plan", "b1", "--direct", env=env).stdout)
+        self.assertOk(self.ws.ms("ship", "b1", "--yes", "--skip-e2e", env=env))
+        self.assertIn("pr create --base next --head feat/b1", (self.ws.tmp / "gh-calls").read_text())
+        self.assertNotIn("many", self.ws.remote_log("lib"), "the PR path must not touch the base branch")
 
     def test_big_changes_get_a_pr_recommendation_but_the_mode_is_not_changed(self):
         self.ws.set_toml(DEFAULT_TOML + "[ship]\nrecommend_pr_new_files = 3\nrecommend_pr_files = 0\n")
@@ -3788,6 +3842,22 @@ class TestProcesses(Base):
         p.wait(timeout=5)
         self.assertOk(self.ws.ms("clean", "b1"))
 
+    def test_kill_hint_names_the_tmux_session_and_ignores_other_processes(self):
+        sys.path.insert(0, str(REPO / "lib"))
+        from ms_workspace.procs import kill_hint
+        self.assertTrue(kill_hint("tmux new-session -d -s next -n next -c /w claude --name x").startswith("end the tmux session with: tmux kill-session -t next"))
+        self.assertTrue(kill_hint("/usr/bin/tmux new -s api").startswith("end the tmux session with: tmux kill-session -t api"))
+        self.assertIn("ends it too", kill_hint("tmux new -s api"))
+        self.assertEqual(kill_hint("claude --name dev"), "")
+        self.assertEqual(kill_hint("sleep 300"), "")
+
+    def test_the_tmux_script_starts_the_server_in_the_project_folder_and_the_skill_uses_its_own_path(self):
+        script = (REPO / "skills" / "tmux-session" / "scripts" / "claude-tmux.sh").read_text()
+        self.assertLess(script.index('cd "$SUB_DIR"'), script.index("tmux new-session"))
+        skill = (REPO / "skills" / "tmux-session" / "SKILL.md").read_text()
+        self.assertNotIn("bash ~/.claude/skills", skill)
+        self.assertIn("Base directory for this", skill)
+
     def test_force_clean_warns_but_proceeds(self):
         d = self.ws.batch("b1", "lib")
         p = self.sleeper(cwd=d / "lib")
@@ -4862,6 +4932,179 @@ class TestPromote(Base):
         self.assertEqual(self.remote("main"), before)
 
 
+# --------------------------------------------------------------------- contract
+class TestContract(Base):
+    def setUp(self):
+        super().setUp()
+        lib, app = self.ws.root / "lib", self.ws.root / "app"
+        (lib / "src").mkdir(parents=True)
+        (lib / "src" / "SalesDTOs.kt").write_text(textwrap.dedent("""\
+            package x
+
+            data class SaleItemDTO(
+                val id: Long? = null,
+                val presentationId: Long? = null,
+                val notes: String? = null,
+                val subItems: List<SaleItemDTO> = emptyList()
+            )
+
+            data class SaleDTO(
+                val id: Long? = null,
+                val items: List<SaleItemDTO> = emptyList()
+            )
+            """))
+        (app / "src").mkdir(parents=True)
+        (app / "src" / "Quote.java").write_text("public record Quote(String code, int qty) {\n}\n")
+        (app / "node_modules" / "x").mkdir(parents=True)
+        (app / "node_modules" / "x" / "Ghost.ts").write_text("export interface SaleDTO { ghost: true }\n")
+
+    def test_prints_the_declaration_with_its_fields_and_skips_dependency_folders(self):
+        r = self.ws.ms("contract", "SaleDTO")
+        self.assertOk(r)
+        self.assertIn("lib/src/SalesDTOs.kt:10", r.stdout)
+        self.assertIn("val items: List<SaleItemDTO> = emptyList()", r.stdout)
+        self.assertNotIn("presentationId", r.stdout, "only the asked type, not its neighbour")
+        self.assertNotIn("ghost", r.stdout)
+
+    def test_a_java_record_and_the_repo_filter(self):
+        r = self.ws.ms("contract", "Quote", "--repo", "app")
+        self.assertOk(r)
+        self.assertIn("app/src/Quote.java:1", r.stdout)
+        self.assertIn("record Quote(String code, int qty)", r.stdout)
+        self.assertNotEqual(self.ws.ms("contract", "SaleDTO", "--repo", "app").returncode, 0)
+
+    def test_unknown_names_list_similar_ones_and_bad_input_is_rejected(self):
+        r = self.ws.ms("contract", "SaleItem")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("similar names", r.stdout)
+        self.assertIn("SaleItemDTO", r.stdout)
+        for bad in (["Sale DTO"], [], ["SaleDTO", "--max-lines", "x"], ["SaleDTO", "--bogus"], ["SaleDTO", "--repo", "nope"]):
+            with self.subTest(bad=bad):
+                self.assertNotEqual(self.ws.ms("contract", *bad).returncode, 0)
+
+    def test_the_declaration_is_capped(self):
+        r = self.ws.ms("contract", "SaleItemDTO", "--max-lines", "3")
+        self.assertIn("cut at 3 lines", r.stdout)
+
+
+# --------------------------------------------------------------------- merge
+class TestMerge(Base):
+    def setUp(self):
+        super().setUp()
+        d = self.ws.batch("b1", "lib")
+        self.ws.commit(d / "lib", "feature", {"f.txt": "1"})
+        self.bin = self.ws.tmp / "mergebin"
+        self.bin.mkdir()
+        for tool in ("git", "python3", "bash", "cat", "basename"):
+            real = subprocess.run(["which", tool], capture_output=True, text=True).stdout.strip()
+            (self.bin / tool).symlink_to(real)
+        self.state = self.ws.tmp / "gh-state"
+        self.checks = self.ws.tmp / "gh-checks"
+        self.state.write_text("OPEN")
+        self.checks.write_text('[{"name": "t", "bucket": "pass"}]')
+        gh = self.bin / "gh"
+        gh.write_text(f"""#!/bin/sh
+echo "$@" >> "{self.ws.tmp}/gh-calls"
+case "$1 $2" in
+  "pr list") printf '[{{"number": 7, "url": "https://github.com/acme/lib/pull/7", "state": "%s", "mergeable": "MERGEABLE", "headRefOid": "abc123"}}]' "$(cat {self.state})" ;;
+  "pr checks") cat {self.checks} ;;
+  "pr merge") git push origin feat/b1:next >/dev/null 2>&1; echo MERGED > {self.state} ;;
+esac
+""")
+        gh.chmod(0o755)
+        self.env = {"PATH": str(self.bin)}
+
+    def calls(self):
+        f = self.ws.tmp / "gh-calls"
+        return f.read_text() if f.exists() else ""
+
+    def test_without_yes_it_only_shows_the_pr_and_its_checks(self):
+        r = self.ws.ms("merge", "b1", env=self.env)
+        self.assertOk(r)
+        self.assertIn("PR #7 https://github.com/acme/lib/pull/7 OPEN, checks 1 pass / 0 pending / 0 failed", r.stdout)
+        self.assertIn("plan only", r.stdout)
+        self.assertNotIn("pr merge", self.calls())
+
+    def test_yes_merges_with_the_chosen_method_and_updates_the_base_checkout(self):
+        r = self.ws.ms("merge", "b1", "--yes", "--method", "squash", env=self.env)
+        self.assertOk(r)
+        self.assertIn("pr merge 7 --squash --match-head-commit abc123", self.calls())
+        self.assertIn("merged PR #7 (squash)", r.stdout)
+        self.assertIn("next fast-forwarded to origin/next", r.stdout)
+        self.assertTrue((self.ws.project / "lib" / "f.txt").is_file() if self.ws.dynamia else (self.ws.root / "lib" / "f.txt").is_file())
+        self.assertIn("PR #7", self.ws.ms("log", "--action", "merge").stdout)
+
+    def test_a_failed_check_stops_everything_and_pending_checks_time_out(self):
+        self.checks.write_text('[{"name": "t", "bucket": "fail"}]')
+        r = self.ws.ms("merge", "b1", "--yes", env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("1 check(s) failed", r.stderr)
+        self.assertNotIn("pr merge", self.calls())
+        self.checks.write_text('[{"name": "t", "bucket": "pending"}]')
+        r = self.ws.ms("merge", "b1", "--yes", "--wait", "0", env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("still pending after 0s", r.stderr)
+        self.assertNotIn("pr merge", self.calls())
+
+    def test_a_gh_error_is_never_read_as_green_and_no_checks_need_an_explicit_ok(self):
+        gh = self.bin / "gh"
+        original = gh.read_text()
+        # gh fails (auth/network): no JSON, an error on stderr
+        gh.write_text(original.replace('"pr checks") cat ' + str(self.checks) + ' ;;', '"pr checks") echo "HTTP 401: bad credentials" >&2; exit 1 ;;'))
+        r = self.ws.ms("merge", "b1", "--yes", env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("gh pr checks failed", r.stderr)
+        self.assertIn("HTTP 401", r.stderr)
+        self.assertNotIn("pr merge", self.calls())
+        # the PR has no checks at all (or CI has not started): refuse unless told it is fine
+        gh.write_text(original.replace('"pr checks") cat ' + str(self.checks) + ' ;;', '"pr checks") echo "no checks reported on the feat/b1 branch" >&2; exit 1 ;;'))
+        r = self.ws.ms("merge", "b1", "--yes", "--wait", "0", env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no checks were reported", r.stderr)
+        self.assertNotIn("pr merge", self.calls())
+        r = self.ws.ms("merge", "b1", "--yes", "--no-checks-ok", env=self.env)
+        self.assertOk(r)
+        self.assertIn("pr merge 7", self.calls())
+
+    def test_a_failure_in_one_repo_merges_nothing_and_the_batch_worktree_is_not_needed(self):
+        d = self.ws.batch("b2", "lib", "app")
+        for repo in ("lib", "app"):
+            self.ws.commit(d / repo, "change", {f"{repo}.txt": "1"})
+        gh = self.bin / "gh"
+        gh.write_text(f"""#!/bin/sh
+echo "$(basename "$PWD") $@" >> "{self.ws.tmp}/gh-calls"
+n=7; [ "$(basename "$PWD")" = app ] && n=8
+case "$1 $2" in
+  "pr list") printf '[{{"number": %s, "url": "https://github.com/acme/x/pull/%s", "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "h%s"}}]' $n $n $n ;;
+  "pr checks") if [ "$n" = 8 ]; then echo '[{{"name":"t","bucket":"fail"}}]'; exit 1; else echo '[{{"name":"t","bucket":"pass"}}]'; fi ;;
+esac
+""")
+        r = self.ws.ms("merge", "b2", "--yes", env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("1 check(s) failed", r.stderr)
+        self.assertNotIn("pr merge", self.calls(), "the lib PR must not be merged while app is red")
+
+    def test_an_already_merged_pr_only_updates_the_base_and_a_missing_pr_is_reported(self):
+        self.state.write_text("MERGED")
+        r = self.ws.ms("merge", "b1", "--yes", env=self.env)
+        self.assertOk(r)
+        self.assertIn("was already merged", r.stdout)
+        self.assertNotIn("pr merge", self.calls())
+        (self.bin / "gh").write_text('#!/bin/sh\n[ "$1 $2" = "pr list" ] && echo "[]"\n')
+        r = self.ws.ms("merge", "b1", env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no pull request", r.stdout + r.stderr)
+
+    def test_bad_options_are_rejected_and_the_guards_know_the_command(self):
+        self.assertNotEqual(self.ws.ms("merge", "b1", "--method", "fast", env=self.env).returncode, 0)
+        self.assertNotEqual(self.ws.ms("merge", env=self.env).returncode, 0)
+        sys.path.insert(0, str(REPO / "lib"))
+        from ms_workspace import guard, thanos_guard
+        self.assertTrue(guard.confirm_reasons(self.ws.root, "ms-workspace merge b1 --yes"))
+        self.assertEqual(guard.confirm_reasons(self.ws.root, "ms-workspace merge b1"), [])
+        self.assertEqual(thanos_guard._ms(["merge", "b1"], ["merge", "b1"])[0], "block")
+
+
 # --------------------------------------------------------------------- THANOS
 class TestThanos(Base):
     SID = "sess-1"
@@ -4996,6 +5239,95 @@ class TestThanos(Base):
         r = self.ws.ms("thanos", "stop-hook", input=json.dumps({"session_id": "stranger"}))
         self.assertEqual((r.returncode, r.stdout), (0, ""))
         self.assertEqual(self.ws.ms("thanos", "stop-hook", input="not json").returncode, 0)
+
+    def write_usage(self, p5, p7=10.0):
+        now = time.time()
+        (self.ws.cache / "usage.json").write_text(json.dumps({
+            "captured_at": now, "five_hour": {"used_percentage": p5, "resets_at": now + 3 * 3600},
+            "seven_day": {"used_percentage": p7, "resets_at": now + 4 * 86400}}))
+
+    def test_wait_buys_exactly_one_uncounted_stop(self):
+        d = self.start("--max-steps", "5")
+        self.tasks(d, "- [ ] [S] first: do it")
+        r = self.ws.ms("thanos", "wait", "5", cwd=d / "lib")
+        self.assertOk(r)
+        self.assertIn("next stop does not count", r.stdout)
+        self.assertEqual(self.hook("thanos stop-hook", {}).stdout.strip(), "", "the stop that waits for the agent is silent")
+        self.assertEqual(self.state(d)["steps"], 0)
+        out = json.loads(self.hook("thanos stop-hook", {}).stdout)   # woken by the notification and stopping again: counted
+        self.assertIn("step 1/5", out["reason"])
+
+    def test_wait_never_exempts_the_usage_checks_and_is_capped(self):
+        d = self.start("--until-usage", "80")
+        self.tasks(d, "- [ ] [S] first: do it")
+        self.write_usage(90)
+        self.assertOk(self.ws.ms("thanos", "wait", "5", cwd=d / "lib"))
+        out = json.loads(self.hook("thanos stop-hook", {}).stdout)
+        self.assertIn("THANOS paused: plan usage", out["systemMessage"], "a wait cannot hide a usage ceiling")
+        st = self.state(d)
+        st["status"], st["waits"] = "working", 30
+        (d / ".thanos.json").write_text(json.dumps(st))
+        r = self.ws.ms("thanos", "wait", "5", cwd=d / "lib")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("used 30 times", r.stderr)
+
+    def test_until_usage_without_usage_data_pauses_instead_of_running_unbounded(self):
+        d = self.start("--until-usage", "80")
+        self.tasks(d, "- [ ] [S] first: do it")
+        out = json.loads(self.hook("thanos stop-hook", {}).stdout)
+        self.assertIn("no plan usage data", out["systemMessage"])
+        self.assertEqual(self.state(d)["status"], "paused")
+
+    def test_until_usage_replaces_the_step_cap_with_a_usage_ceiling(self):
+        d = self.start("--until-usage", "80")
+        st = self.state(d)
+        self.assertEqual((st["until_usage"], st["max_steps"]), (80.0, 10000))
+        self.tasks(d, "- [ ] [S] first: do it")
+        self.write_usage(40)
+        self.assertEqual(json.loads(self.hook("thanos stop-hook", {}).stdout)["decision"], "block")
+        self.write_usage(40, p7=85)   # the weekly window counts too
+        (d / "lib" / "n.txt").write_text("x")
+        out = json.loads(self.hook("thanos stop-hook", {}).stdout)
+        self.assertIn("plan usage reached 85%", out["systemMessage"])
+        self.assertEqual(self.state(d)["status"], "paused")
+
+    def test_until_usage_is_validated_and_opus_used_counts_a_review_done_before_start(self):
+        self.ws.batch("b0", "lib")
+        self.assertNotEqual(self.ws.ms("thanos", "start", "b0", "--until-usage", "150").returncode, 0)
+        self.assertNotEqual(self.ws.ms("thanos", "start", "b0", "--opus-used", "9").returncode, 0)
+        d = self.start("--opus-used", "1")
+        self.assertEqual(self.state(d)["opus_used"], 1)
+        boss = {"tool_name": "Agent", "tool_input": {"subagent_type": "dynamia:boss", "prompt": "review"}}
+        for _ in range(2):
+            self.assertEqual(self.decision(self.hook("thanosguard", boss, d / "lib")), "allow")
+        self.assertEqual(self.hook("thanosguard", boss, d / "lib").returncode, 2)
+
+    def test_block_with_a_task_parks_it_in_the_ledger(self):
+        d = self.start()
+        self.tasks(d, "- [ ] [S] login: add it", "- [ ] [S] other: x")
+        r = self.ws.ms("thanos", "block", "--task", "login", "gh is blocked", cwd=d / "lib")
+        self.assertOk(r)
+        self.assertIn("task login parked", r.stdout)
+        led = (d / "THANOS.md").read_text()
+        self.assertIn("- [!] [S] login: add it", led)
+        self.assertIn("- [ ] [S] other: x", led)
+        self.assertIn("gh is blocked", led)
+        self.assertIn("1 parked", self.ws.ms("thanos", "status", "b1").stdout)
+        self.assertIn("no open task named nope", self.ws.ms("thanos", "block", "--task", "nope", "x", cwd=d / "lib").stdout)
+
+    def test_the_strict_guard_allows_read_only_gh_and_still_blocks_gh_writes(self):
+        d = self.start()
+        for cmd in ("gh issue view 12 --json body", "gh issue list --state open", "gh pr checks 5", "gh pr view 5", "gh run list"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.decision(self.bash(cmd, d / "lib")), "allow", cmd)
+        for cmd in ("gh pr view 5 --web=true", "gh pr view 5 -cw", "gh issue list -w", "GH_BROWSER='sh -c x' gh pr view 5 --web=true",
+                    "GH_PAGER=evil gh pr diff 5", "env GH_PAGER=x gh pr diff 5", "GIT_EXTERNAL_DIFF=evil git diff", "PAGER=evil git log", "BROWSER=evil gh pr view 5"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.bash(cmd, d / "lib").returncode, 2, cmd)
+        self.assertEqual(self.decision(self.bash("CI=1 pnpm test", d / "lib")), "allow", "ordinary variables stay fine")
+        for cmd in ("gh pr create --fill", "gh pr merge 5", "gh issue close 3", "gh issue comment 3 -b x", "gh pr view 5 --web", "gh api -X POST /x", "gh release create v1"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.bash(cmd, d / "lib").returncode, 2, cmd)
 
     def test_a_task_gets_its_own_branch_and_is_merged_into_the_batch_branch(self):
         d = self.start("--push-every", "1")

@@ -22,9 +22,10 @@ invoked by Claude, so this skill replaces it with `AskUserQuestion`).
    options. Skip the question if the user already named a folder that matches.
 
 3. **Launch the bundled script detached** (never attached: it would block the
-   skill):
+   skill). The script lives next to this file, so use the "Base directory for this
+   skill" shown above, not a fixed path (plugin skills are not under `~/.claude/skills`):
    ```bash
-   bash ~/.claude/skills/tmux-session/scripts/claude-tmux.sh "<chosen-folder>" --detached
+   bash "<base directory of this skill>/scripts/claude-tmux.sh" "<chosen-folder>" --detached
    ```
    It creates a single-window tmux session named after the folder, marks the
    folder as trusted, starts Claude Code, and enables Remote Control in the
@@ -39,6 +40,7 @@ invoked by Claude, so this skill replaces it with `AskUserQuestion`).
 ## Notes
 
 - Requires `tmux`, `claude` and `jq` in PATH.
+- To end a session you started, use `tmux kill-session -t <session>` (`ms-workspace ps kill` refuses tmux, and `clean` tells you the same).
 - If the session does not appear in claude.ai/code, retry manually:
   `tmux send-keys -t <session> "/remote-control" Enter`, then after ~2s
   `tmux send-keys -t <session> Enter`.

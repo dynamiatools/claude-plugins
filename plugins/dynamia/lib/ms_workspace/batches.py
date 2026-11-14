@@ -362,6 +362,17 @@ def push_mode(ws: Workspace, repo: str, force_pr: bool = False, force_direct: bo
 
 
 PR_HINT_DEFAULTS = {"files": 20, "lines": 800, "new_files": 10}
+PR_URL = re.compile(r"https?://\S+/pull/\d+")
+
+
+def effective_mode(ws: Workspace, repo: str, wt: Path, base: str, force_pr: bool, force_direct: bool) -> str:
+    """`push_mode`, plus the workspace's standing answer to "this change is big, PR?": with [ship] recommended_action = "pr",
+    a repo that would push directly opens a PR instead whenever pr_recommendation fires. --pr/--direct on the command line win."""
+    mode = push_mode(ws, repo, force_pr, force_direct)
+    if mode == "direct" and not force_pr and not force_direct and ws.get("ship", "recommended_action", default="ask") == "pr" \
+            and pr_recommendation(ws, wt, base_ref(wt, base)):
+        return "pr"
+    return mode
 
 
 def pr_recommendation(ws: Workspace, wt: Path, ref: str) -> str:
@@ -480,9 +491,12 @@ def _ship(ws: Workspace, args: list[str]) -> int:
         return 0
 
     print(f"Plan for batch '{batch}' (this is what would be sent):")
+    modes: dict[str, str] = {}
     for r in repos:
         wt, base = place[r][0], ws.base(r)
-        mode = push_mode(ws, r, force_pr, force_direct)
+        mode = modes[r] = effective_mode(ws, r, wt, base, force_pr, force_direct)
+        if mode == "pr" and yes and not shutil.which("gh"):
+            die(f"{r}: a pull request needs the GitHub CLI (gh) in PATH; nothing was pushed")
         ref = base_ref(wt, base)
         n = ahead_of_base(wt, base)
         print(f"  {r}: {place[r][1]} -> {base} ({mode}, {n} commits)")
@@ -493,9 +507,11 @@ def _ship(ws: Workspace, args: list[str]) -> int:
         stat = git_out(wt, "diff", "--shortstat", f"{ref}...HEAD")
         if stat:
             print(f"      {stat}")
-        why = pr_recommendation(ws, wt, ref) if mode != "pr" else ""
-        if why:
+        why = pr_recommendation(ws, wt, ref)
+        if why and mode != "pr":
             print(f"      RECOMMEND A PR: {why}. A direct push sends it all to {base} at once; to open a PR instead: ms-workspace ship {batch} --pr")
+        elif why and not (force_pr or ws.repo_cfg(r).get("push") == "pr"):
+            print(f"      PR chosen automatically: {why} ([ship] recommended_action = \"pr\"); pass --direct to push to {base} instead")
     from .gate import gate_places, report
     gate_lines, gate_blocks, gate_warns = report(gate_places(ws, place))
     print("  gate: " + ("clean" if not gate_blocks and not gate_warns else f"{gate_blocks} blocking, {gate_warns} warning(s)") + ("  [skipped by --skip-gate]" if skip_gate else ""))
@@ -542,13 +558,14 @@ def _ship(ws: Workspace, args: list[str]) -> int:
     record = {"batch": batch, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "repos": {}}
     for r in repos:
         wt, base = place[r][0], ws.base(r)
-        record["repos"][r] = {"base": base, "mode": push_mode(ws, r, force_pr, force_direct), "branch": place[r][1],
+        record["repos"][r] = {"base": base, "mode": modes[r], "branch": place[r][1],
                               "before": git_out(wt, "rev-parse", f"origin/{base}"), "after": git_out(wt, "rev-parse", "HEAD"), "pushed": False}
     record_path.parent.mkdir(parents=True, exist_ok=True)
     record_path.write_text(json.dumps(record, indent=2))
     for r in repos:
         wt, base = place[r][0], ws.base(r)
-        mode = push_mode(ws, r, force_pr, force_direct)
+        mode = modes[r]
+        pr_url = ""
         if mode == "pr":
             p = subprocess.run(["git", "-C", str(wt), "push", "origin", place[r][1]])
             if p.returncode != 0:
@@ -556,7 +573,12 @@ def _ship(ws: Workspace, args: list[str]) -> int:
             checks = "- Unit tests (t1): passed" + ("" if skip_e2e else "\n- End-to-end: passed") + ("\n- Smoke checks: passed" if smoke and not skip_smoke else "")
             title, body = pr_text(wt, base, batch, pr_title, pr_body, checks)
             try:
-                p = subprocess.run(["gh", "pr", "create", "--base", base, "--head", place[r][1], "--title", title, "--body", body], cwd=wt)
+                p = subprocess.run(["gh", "pr", "create", "--base", base, "--head", place[r][1], "--title", title, "--body", body],
+                                   cwd=wt, stdout=subprocess.PIPE, text=True)
+                found = PR_URL.search(p.stdout or "")
+                pr_url = found.group(0) if found else ""
+                if p.stdout:
+                    print(p.stdout.rstrip())
             except OSError as e:
                 die(f"{r}: {place[r][1]} was pushed but 'gh' failed to start ({e}); open the PR by hand")
             if p.returncode != 0:
@@ -566,12 +588,18 @@ def _ship(ws: Workspace, args: list[str]) -> int:
             if p.returncode != 0:
                 die(f"{r}: push to {base} rejected (base moved again? run ship again)")
         record["repos"][r]["pushed"] = True
+        if pr_url:
+            record["repos"][r]["pr"] = pr_url
         record_path.write_text(json.dumps(record, indent=2))
-        ws.log("ship", "ok", r, batch, f"{place[r][1]} -> {base} ({mode})",
+        ws.log("ship", "ok", r, batch, f"{place[r][1]} -> {base} ({mode})" + (f" {pr_url}" if pr_url else ""),
                before=record["repos"][r]["before"][:12], after=record["repos"][r]["after"][:12])
-        print(f"  pushed {r}")
+        print(f"  pushed {r}" + (f": PR {pr_url}" if pr_url else ""))
     ws._shipped = list(repos)
-    print(f"Shipped. " + ("The branch stays in your checkout; delete it when merged. " if plain else f"Cleanup: ms-workspace clean {batch}. ") + f"To revert: ms-workspace undo {batch}")
+    opened = any(m == "pr" for m in modes.values())
+    tail = ("The branch stays in your checkout; delete it when merged. " if plain else
+            f"The PR is open: merge it (ms-workspace merge {batch} --yes, or on GitHub) and then clean: ms-workspace clean {batch}. " if opened else
+            f"Cleanup: ms-workspace clean {batch}. ")
+    print("Shipped. " + tail + f"To revert: ms-workspace undo {batch}")
     return 0
 
 
@@ -621,7 +649,10 @@ def cmd_clean(ws: Workspace, args: list[str]) -> int:
     if running:
         listing = "; ".join(f"{pid} ({cmd})" for pid, cmd in running[:5])
         if not force:
-            die(f"processes are still running inside the batch: {listing}. Stop them (ms-workspace ps kill <pid> --yes) or use --force")
+            from .procs import kill_hint
+            hints = sorted({h for _, cmd in running if (h := kill_hint(cmd))})
+            how = ("; ".join(hints) + " (ps kill refuses protected processes such as tmux)") if hints else "Stop them (ms-workspace ps kill <pid> --yes)"
+            die(f"processes are still running inside the batch: {listing}. {how}, or use --force")
         eprint(f"warning: removing the batch while these processes run in it: {listing}")
     flags = ["--force"] if force else []
     for r in repos:

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -44,6 +46,22 @@ def _memo_key(ws: Workspace, repo: str, directory: Path, batch: str, cmd: str) -
     return h.hexdigest()[:20]
 
 
+def pass_warning(directory: Path, cmd: str) -> str:
+    """Why a green run may not have run every test (empty when nothing looks wrong).
+
+    `pnpm -r test` only runs the `test` script of the workspace packages: a root `test` script (typical when
+    the tests live in a root `tests/` folder) is skipped, so the run can be green while the suite is never run."""
+    if re.search(r"\bpnpm\s+(-r|--recursive)\s+test\b", cmd):
+        try:
+            root_test = json.loads((directory / "package.json").read_text()).get("scripts", {}).get("test")
+        except (OSError, ValueError):
+            root_test = None
+        if root_test and not re.search(r"(^|\s)(-r|--recursive)(\s|$)", root_test):   # a root script that is itself `pnpm -r test` runs them all
+            return (f"the root package.json has its own test script ('{root_test}') that `pnpm -r test` does not run; "
+                    "set [repos.<repo>.test] unit = \"pnpm test\" in workspace.toml if the root suite matters")
+    return ""
+
+
 def run_tests(ws: Workspace, repo: str, directory: Path, level: str, batch: str | None = None) -> int:
     batch = batch_of_cwd(ws) if batch is None else batch
     base = ws.base(repo)
@@ -77,6 +95,9 @@ def run_tests(ws: Workspace, repo: str, directory: Path, level: str, batch: str 
         if rc == 0:
             (memo_dir / f"{repo}-{key}").touch()
             print(f"PASS {level} {repo} ({secs}s): {cmd}")
+            warning = pass_warning(directory, cmd)
+            if warning:
+                print(f"WARN {level} {repo}: {warning}", file=sys.stderr)
             ws.log(f"test.{level}", "ok", repo, batch, cmd, key=key, secs=secs)
         else:
             print(f"FAIL {level} {repo} ({secs}s): {cmd}", file=sys.stderr)

@@ -65,6 +65,9 @@ if [ -f "$CLAUDE_CONFIG" ]; then
     fi
 fi
 
+# The tmux server keeps the working directory it was started from; start it in the project folder, never in a
+# batch worktree, or `ms-workspace clean` later sees the server as a process running inside that batch.
+cd "$SUB_DIR"
 printf -v CLAUDE_CMD 'claude --name %q; tmux kill-session -t %q' "$(hostname):$CHOSEN" "$SESSION_NAME"
 tmux new-session -d -s "$SESSION_NAME" -n "$SESSION_NAME" -c "$SUB_DIR" "$CLAUDE_CMD"
 

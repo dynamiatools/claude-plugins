@@ -14,10 +14,12 @@ stale_minutes = 15           # note when the usage snapshot is older than this
 [context]                   # token-saving hooks (see README: outguard)
 bash_output_max_chars = 30000   # longer Bash output is cut to its first and last lines; the full text is saved to a file
 
-[ship]                       # advice only: `plan`/`ship` print "RECOMMEND A PR" when a repo's change reaches a limit (0 turns one off)
+[ship]                       # `plan`/`ship` print "RECOMMEND A PR" when a repo's change reaches a limit (0 turns one off)
 # recommend_pr_files = 20         # files changed
 # recommend_pr_lines = 800        # lines added + deleted
 # recommend_pr_new_files = 10     # files created
+# recommended_action = "ask"      # "pr": a big change (above) opens a PR instead of pushing directly; --direct still wins
+# merge_method = "merge"          # `ms-workspace merge`: merge | squash | rebase
 
 [http]                      # API checks (ms-workspace http); requests live in <workspace>/requests/*.http.toml
 dir = "requests"
