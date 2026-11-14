@@ -34,8 +34,10 @@ GIT_SAFE = {"status", "diff", "log", "show", "add", "commit", "rev-parse", "rev-
             "describe", "merge", "cherry-pick", "rebase", "fetch", "switch", "tag", "grep", "diff-tree", "merge-base", "show-ref",
             "for-each-ref", "name-rev", "bisect", "apply", "am", "mv", "merge-tree", "count-objects", "check-ignore", "ls-remote", "version"}
 GIT_NEVER = {"gc", "prune", "filter-branch", "filter-repo", "replace", "send-pack", "svn", "fast-import"}
+GH_READ = {"issue": {"view", "list", "status"}, "pr": {"view", "list", "checks", "diff", "status"}, "repo": {"view"},
+           "run": {"view", "list"}, "release": {"view", "list"}}
 MS_SAFE = {"status", "log", "usage", "plan", "test", "integrate", "affected", "context", "memory", "recall", "doctor", "gate", "budget",
-           "insights", "tokens", "thanos", "handoff", "modules", "junit", "sys", "images", "claude-md", "open"}
+           "insights", "tokens", "thanos", "handoff", "modules", "junit", "sys", "images", "claude-md", "open", "contract"}
 MS_BLOCK = {"ship", "clean", "undo", "promote", "setup-hooks", "notify", "batch", "branch", "release"}
 CURL_WRITE = re.compile(r"(^|\s)(-X\s*(POST|PUT|DELETE|PATCH)|--request\s+(POST|PUT|DELETE|PATCH)|-d\b|--data\S*|-F\b|--form\b|-T\b|--upload-file|--json\b)", re.I)
 PIPE_TO_SHELL = re.compile(r"\|\s*(sudo\s+)?(ba|z|da|k)?sh\b")
@@ -189,6 +191,8 @@ def _classify(seg: list[str], m: dict, cwd: str, moved: bool, deny: list[str]) -
             return "unknown", "", cwd, True
         new = os.path.realpath(os.path.expanduser(target) if os.path.isabs(os.path.expanduser(target)) else os.path.join(cwd, target))
         return "safe", "", new, moved
+    if prog == "gh" and len(words) >= 2 and words[1] in GH_READ.get(words[0], ()) and "--web" not in args and "-w" not in args:
+        return "safe", "", cwd, moved   # read-only lookups (issue text, PR state, CI checks) do not publish anything
     if prog in REMOTE:
         return "block", f"{prog} reaches machines or services outside the batch", cwd, moved
     if prog in DESTROY:

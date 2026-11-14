@@ -4997,6 +4997,72 @@ class TestThanos(Base):
         self.assertEqual((r.returncode, r.stdout), (0, ""))
         self.assertEqual(self.ws.ms("thanos", "stop-hook", input="not json").returncode, 0)
 
+    def write_usage(self, p5, p7=10.0):
+        now = time.time()
+        (self.ws.cache / "usage.json").write_text(json.dumps({
+            "captured_at": now, "five_hour": {"used_percentage": p5, "resets_at": now + 3 * 3600},
+            "seven_day": {"used_percentage": p7, "resets_at": now + 4 * 86400}}))
+
+    def test_wait_lets_the_stop_hook_stop_without_counting_steps(self):
+        d = self.start("--max-steps", "5")
+        self.tasks(d, "- [ ] [S] first: do it")
+        r = self.ws.ms("thanos", "wait", "5", cwd=d / "lib")
+        self.assertOk(r)
+        self.assertIn("do not count as steps", r.stdout)
+        for _ in range(4):
+            self.assertEqual(self.hook("thanos stop-hook", {}).stdout.strip(), "", "stops while waiting are silent")
+        self.assertEqual(self.state(d)["steps"], 0)
+        st = self.state(d)
+        st["waiting_until"] = time.time() - 1   # the window is over: counting resumes
+        (d / ".thanos.json").write_text(json.dumps(st))
+        self.assertIn("step 1/5", json.loads(self.hook("thanos stop-hook", {}).stdout)["reason"])
+
+    def test_until_usage_replaces_the_step_cap_with_a_usage_ceiling(self):
+        d = self.start("--until-usage", "80")
+        st = self.state(d)
+        self.assertEqual((st["until_usage"], st["max_steps"]), (80.0, 10000))
+        self.tasks(d, "- [ ] [S] first: do it")
+        self.write_usage(40)
+        self.assertEqual(json.loads(self.hook("thanos stop-hook", {}).stdout)["decision"], "block")
+        self.write_usage(40, p7=85)   # the weekly window counts too
+        (d / "lib" / "n.txt").write_text("x")
+        out = json.loads(self.hook("thanos stop-hook", {}).stdout)
+        self.assertIn("plan usage reached 85%", out["systemMessage"])
+        self.assertEqual(self.state(d)["status"], "paused")
+
+    def test_until_usage_is_validated_and_opus_used_counts_a_review_done_before_start(self):
+        self.ws.batch("b0", "lib")
+        self.assertNotEqual(self.ws.ms("thanos", "start", "b0", "--until-usage", "150").returncode, 0)
+        self.assertNotEqual(self.ws.ms("thanos", "start", "b0", "--opus-used", "9").returncode, 0)
+        d = self.start("--opus-used", "1")
+        self.assertEqual(self.state(d)["opus_used"], 1)
+        boss = {"tool_name": "Agent", "tool_input": {"subagent_type": "dynamia:boss", "prompt": "review"}}
+        for _ in range(2):
+            self.assertEqual(self.decision(self.hook("thanosguard", boss, d / "lib")), "allow")
+        self.assertEqual(self.hook("thanosguard", boss, d / "lib").returncode, 2)
+
+    def test_block_with_a_task_parks_it_in_the_ledger(self):
+        d = self.start()
+        self.tasks(d, "- [ ] [S] login: add it", "- [ ] [S] other: x")
+        r = self.ws.ms("thanos", "block", "--task", "login", "gh is blocked", cwd=d / "lib")
+        self.assertOk(r)
+        self.assertIn("task login parked", r.stdout)
+        led = (d / "THANOS.md").read_text()
+        self.assertIn("- [!] [S] login: add it", led)
+        self.assertIn("- [ ] [S] other: x", led)
+        self.assertIn("gh is blocked", led)
+        self.assertIn("1 parked", self.ws.ms("thanos", "status", "b1").stdout)
+        self.assertIn("no open task named nope", self.ws.ms("thanos", "block", "--task", "nope", "x", cwd=d / "lib").stdout)
+
+    def test_the_strict_guard_allows_read_only_gh_and_still_blocks_gh_writes(self):
+        d = self.start()
+        for cmd in ("gh issue view 12 --json body", "gh issue list --state open", "gh pr checks 5", "gh pr view 5", "gh run list"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.decision(self.bash(cmd, d / "lib")), "allow", cmd)
+        for cmd in ("gh pr create --fill", "gh pr merge 5", "gh issue close 3", "gh issue comment 3 -b x", "gh pr view 5 --web", "gh api -X POST /x", "gh release create v1"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.bash(cmd, d / "lib").returncode, 2, cmd)
+
     def test_a_task_gets_its_own_branch_and_is_merged_into_the_batch_branch(self):
         d = self.start("--push-every", "1")
         self.tasks(d, "- [ ] [S] login: add it", "- [ ] [S] other: x")
