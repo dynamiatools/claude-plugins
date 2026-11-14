@@ -4921,6 +4921,86 @@ class TestPromote(Base):
         self.assertEqual(self.remote("main"), before)
 
 
+# --------------------------------------------------------------------- merge
+class TestMerge(Base):
+    def setUp(self):
+        super().setUp()
+        d = self.ws.batch("b1", "lib")
+        self.ws.commit(d / "lib", "feature", {"f.txt": "1"})
+        self.bin = self.ws.tmp / "mergebin"
+        self.bin.mkdir()
+        for tool in ("git", "python3", "bash", "cat"):
+            real = subprocess.run(["which", tool], capture_output=True, text=True).stdout.strip()
+            (self.bin / tool).symlink_to(real)
+        self.state = self.ws.tmp / "gh-state"
+        self.checks = self.ws.tmp / "gh-checks"
+        self.state.write_text("OPEN")
+        self.checks.write_text('[{"name": "t", "bucket": "pass"}]')
+        gh = self.bin / "gh"
+        gh.write_text(f"""#!/bin/sh
+echo "$@" >> "{self.ws.tmp}/gh-calls"
+case "$1 $2" in
+  "pr list") printf '[{{"number": 7, "url": "https://github.com/acme/lib/pull/7", "state": "%s", "mergeable": "MERGEABLE"}}]' "$(cat {self.state})" ;;
+  "pr checks") cat {self.checks} ;;
+  "pr merge") git push origin HEAD:next >/dev/null 2>&1; echo MERGED > {self.state} ;;
+esac
+""")
+        gh.chmod(0o755)
+        self.env = {"PATH": str(self.bin)}
+
+    def calls(self):
+        f = self.ws.tmp / "gh-calls"
+        return f.read_text() if f.exists() else ""
+
+    def test_without_yes_it_only_shows_the_pr_and_its_checks(self):
+        r = self.ws.ms("merge", "b1", env=self.env)
+        self.assertOk(r)
+        self.assertIn("PR #7 https://github.com/acme/lib/pull/7 OPEN, checks 1 pass / 0 pending / 0 failed", r.stdout)
+        self.assertIn("plan only", r.stdout)
+        self.assertNotIn("pr merge", self.calls())
+
+    def test_yes_merges_with_the_chosen_method_and_updates_the_base_checkout(self):
+        r = self.ws.ms("merge", "b1", "--yes", "--method", "squash", env=self.env)
+        self.assertOk(r)
+        self.assertIn("pr merge 7 --squash", self.calls())
+        self.assertIn("merged PR #7 (squash)", r.stdout)
+        self.assertIn("next fast-forwarded to origin/next", r.stdout)
+        self.assertTrue((self.ws.project / "lib" / "f.txt").is_file() if self.ws.dynamia else (self.ws.root / "lib" / "f.txt").is_file())
+        self.assertIn("PR #7", self.ws.ms("log", "--action", "merge").stdout)
+
+    def test_a_failed_check_stops_everything_and_pending_checks_time_out(self):
+        self.checks.write_text('[{"name": "t", "bucket": "fail"}]')
+        r = self.ws.ms("merge", "b1", "--yes", env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("1 check(s) failed", r.stderr)
+        self.assertNotIn("pr merge", self.calls())
+        self.checks.write_text('[{"name": "t", "bucket": "pending"}]')
+        r = self.ws.ms("merge", "b1", "--yes", "--wait", "0", env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("still pending after 0s", r.stderr)
+        self.assertNotIn("pr merge", self.calls())
+
+    def test_an_already_merged_pr_only_updates_the_base_and_a_missing_pr_is_reported(self):
+        self.state.write_text("MERGED")
+        r = self.ws.ms("merge", "b1", "--yes", env=self.env)
+        self.assertOk(r)
+        self.assertIn("was already merged", r.stdout)
+        self.assertNotIn("pr merge", self.calls())
+        (self.bin / "gh").write_text('#!/bin/sh\n[ "$1 $2" = "pr list" ] && echo "[]"\n')
+        r = self.ws.ms("merge", "b1", env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no pull request", r.stdout + r.stderr)
+
+    def test_bad_options_are_rejected_and_the_guards_know_the_command(self):
+        self.assertNotEqual(self.ws.ms("merge", "b1", "--method", "fast", env=self.env).returncode, 0)
+        self.assertNotEqual(self.ws.ms("merge", env=self.env).returncode, 0)
+        sys.path.insert(0, str(REPO / "lib"))
+        from ms_workspace import guard, thanos_guard
+        self.assertTrue(guard.confirm_reasons(self.ws.root, "ms-workspace merge b1 --yes"))
+        self.assertEqual(guard.confirm_reasons(self.ws.root, "ms-workspace merge b1"), [])
+        self.assertEqual(thanos_guard._ms(["merge", "b1"], ["merge", "b1"])[0], "block")
+
+
 # --------------------------------------------------------------------- THANOS
 class TestThanos(Base):
     SID = "sess-1"

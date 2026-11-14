@@ -38,7 +38,7 @@ GH_READ = {"issue": {"view", "list", "status"}, "pr": {"view", "list", "checks",
            "run": {"view", "list"}, "release": {"view", "list"}}
 MS_SAFE = {"status", "log", "usage", "plan", "test", "integrate", "affected", "context", "memory", "recall", "doctor", "gate", "budget",
            "insights", "tokens", "thanos", "handoff", "modules", "junit", "sys", "images", "claude-md", "open", "contract"}
-MS_BLOCK = {"ship", "clean", "undo", "promote", "setup-hooks", "notify", "batch", "branch", "release"}
+MS_BLOCK = {"ship", "merge", "clean", "undo", "promote", "setup-hooks", "notify", "batch", "branch", "release"}
 CURL_WRITE = re.compile(r"(^|\s)(-X\s*(POST|PUT|DELETE|PATCH)|--request\s+(POST|PUT|DELETE|PATCH)|-d\b|--data\S*|-F\b|--form\b|-T\b|--upload-file|--json\b)", re.I)
 PIPE_TO_SHELL = re.compile(r"\|\s*(sudo\s+)?(ba|z|da|k)?sh\b")
 SQL_DESTROY = re.compile(r"\b(drop|truncate)\s+(table|database|schema|user)\b|\bdelete\s+from\s+\S+\s*(;|\"|'|$)", re.I)
