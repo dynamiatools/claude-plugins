@@ -163,6 +163,8 @@
       "Bash(ms-workspace test:*)",
       "Bash(ms-workspace integrate:*)",
       "Bash(ms-workspace ship:*)",
+      "Bash(ms-workspace merge:*)",
+      "Bash(ms-workspace contract:*)",
       "Bash(ms-workspace clean:*)",
       "Bash(ms-workspace batch new:*)",
       "Bash(ms-workspace branch new:*)",

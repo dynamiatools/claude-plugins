@@ -10,7 +10,7 @@ AI coding gets expensive and risky when the model does the boring parts: jugglin
 - **Spend tokens on purpose.** Cheap helper agents search and summarize; reports show where the plan went.
 - **Humans publish.** Agents commit locally. You decide what ships.
 
-It has 21 skills, 4 read-only helper agents, guard hooks, a standard-library Python tool (`ms-workspace`) and a status line.
+It has 24 skills, 4 read-only helper agents, guard hooks, a standard-library Python tool (`ms-workspace`) and a status line.
 
 ## Install
 
@@ -51,6 +51,7 @@ These read `workspace.toml`. Without one the tool answers `no .dynamia/workspace
 | `/dynamia:test` | Runs t0 (changed), t1 (whole batch) or t2 (end to end); triages failures | Cheap, cached test levels so the model does not run or read whole suites |
 | `/dynamia:integrate` | Merges agent branches into the batch, reports conflicts, runs t1 | Makes parallel agents safe |
 | `/dynamia:ship` | Plan, sync, tests, push or PR. Only when you ask | Controlled publishing in one place |
+| `/dynamia:merge` | Waits for the CI checks of the PRs `ship` opened, merges them and updates the base branch of your checkout. Only when you ask | The step after `ship --pr` without `gh` and `git` by hand |
 | `/dynamia:thanos` | An autonomous mission: plans, works task by task in its own worktree, validates with Opus at the start and the end, and never ships. Strict guard, step cap, purple status badge | Long goals with few interruptions, without giving up the guard rails. Only when you ask |
 | `/dynamia:dev-env` | Registers dev environment variables per repo or for all | Tests and e2e run with the right variables, kept out of the model's hands |
 | `/dynamia:open` | Opens a batch or an agent's worktrees in VS Code or IntelliJ | Review the work where you are used to reading code |
@@ -58,6 +59,8 @@ These read `workspace.toml`. Without one the tool answers `no .dynamia/workspace
 | `/dynamia:recall` | Full-text search over past sessions, notes and the log | "Where did we decide X?" without re-reading transcripts |
 | `/dynamia:release` | What waits to go from the base branch to qa or main; release notes | Release prep without manual git archaeology |
 | `/dynamia:promote` | Opens a PR from the base branch to qa or main. Only when you ask | The one deliberate way to reach production; `ship` still never touches release branches |
+| `/dynamia:issues` | Closes or comments GitHub issues against what the code really does, linking the PR. Only when you ask | Never closes a half-done issue |
+| `/dynamia:contract` | Shows the real fields of a DTO across the workspace repos | Map an API from the code that serves it, not from memory |
 | `/dynamia:report` | Plan usage and pace, where tokens went, slow or flaky tests | Spend the plan on purpose. Usage works without a workspace; the per-batch history needs one |
 
 ### They work anywhere
