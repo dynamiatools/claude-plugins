@@ -2253,6 +2253,36 @@ class TestPrMode(Base):
         self.assertIn("--title Add the feature --body Why this change exists", call)
         self.assertIn("unknown option", self.ws.ms("ship", "b1", "--bogus", env=env).stderr + self.ws.ms("ship", "b1", "--bogus", env=env).stdout)
 
+    def gh_with_url(self):
+        path = self.fake_path(True)
+        gh = Path(path) / "gh"
+        gh.write_text(f'#!/bin/sh\necho "$@" >> "{self.ws.tmp}/gh-calls"\necho "https://github.com/acme/lib/pull/42"\n')
+        gh.chmod(0o755)
+        return path
+
+    def test_the_pr_url_is_printed_logged_and_kept_in_the_ship_record(self):
+        r = self.ws.ms("ship", "b1", "--yes", "--skip-e2e", env={"PATH": self.gh_with_url()})
+        self.assertOk(r)
+        self.assertIn("pushed lib: PR https://github.com/acme/lib/pull/42", r.stdout)
+        self.assertIn("https://github.com/acme/lib/pull/42", self.ws.ms("log", "--action", "ship").stdout)
+        records = list((self.ws.root / ".ms-workspace" / "ship").glob("b1-*.json")) or list(self.ws.root.rglob("ship/b1-*.json"))
+        self.assertEqual(json.loads(records[0].read_text())["repos"]["lib"]["pr"], "https://github.com/acme/lib/pull/42")
+
+    def test_recommended_action_pr_opens_a_pr_for_big_changes_and_direct_still_wins(self):
+        self.ws.set_toml(DEFAULT_TOML + "[ship]\nrecommend_pr_new_files = 3\nrecommend_pr_files = 0\nrecommended_action = \"pr\"\n")
+        env = {"PATH": self.gh_with_url()}
+        d = self.ws.root / ".batches" / "b1" / "lib"
+        self.assertIn("(direct, 1 commits)", self.ws.ms("plan", "b1", env=env).stdout, "a small change keeps the configured mode")
+        self.ws.commit(d, "many", {f"n{i}.txt": "x\n" for i in range(4)})
+        plan = self.ws.ms("plan", "b1", env=env)
+        self.assertIn("(pr, 2 commits)", plan.stdout)
+        self.assertIn("PR chosen automatically", plan.stdout)
+        self.assertNotIn("RECOMMEND A PR", plan.stdout)
+        self.assertIn("(direct, 2 commits)", self.ws.ms("plan", "b1", "--direct", env=env).stdout)
+        self.assertOk(self.ws.ms("ship", "b1", "--yes", "--skip-e2e", env=env))
+        self.assertIn("pr create --base next --head feat/b1", (self.ws.tmp / "gh-calls").read_text())
+        self.assertNotIn("many", self.ws.remote_log("lib"), "the PR path must not touch the base branch")
+
     def test_big_changes_get_a_pr_recommendation_but_the_mode_is_not_changed(self):
         self.ws.set_toml(DEFAULT_TOML + "[ship]\nrecommend_pr_new_files = 3\nrecommend_pr_files = 0\n")
         d = self.ws.root / ".batches" / "b1" / "lib"
