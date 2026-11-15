@@ -5411,5 +5411,21 @@ class TestThanos(Base):
         self.assertNotIn("THANOS", line(sid="other"))
 
 
+class TestNonUtf8GitOutput(unittest.TestCase):
+    def test_git_helper_survives_latin1_bytes_in_a_diff(self):
+        sys.path.insert(0, str(REPO / "lib"))
+        from ms_workspace.core import git
+        with tempfile.TemporaryDirectory() as d:
+            for c in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+                subprocess.run(["git", "-C", d, *c], check=True)
+            f = Path(d) / "a.properties"
+            f.write_bytes("accion=Acci\u00f3n\n".encode("latin-1"))
+            subprocess.run(["git", "-C", d, "add", "."], check=True)
+            subprocess.run(["git", "-C", d, "commit", "-qm", "x"], check=True)
+            f.write_bytes("accion=Acci\u00f3n 2\n".encode("latin-1"))
+            out = git(d, "diff", "--unified=0", "--no-color").stdout
+            self.assertIn("accion=Acci", out)
+
+
 if __name__ == "__main__":
     unittest.main()

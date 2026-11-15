@@ -21,7 +21,8 @@ def die(message: str):
 
 # ---------------------------------------------------------------- subprocess / git
 def run(cmd, cwd=None, input=None, env=None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=cwd, input=input, env=env, text=True, capture_output=True)
+    # Git output can hold non-UTF-8 bytes (old Latin-1 files in a diff): never crash the gate on it.
+    return subprocess.run(cmd, cwd=cwd, input=input, env=env, text=True, encoding="utf-8", errors="replace", capture_output=True)
 
 
 def git(cwd, *args) -> subprocess.CompletedProcess:
