@@ -14,7 +14,7 @@ The destination must be listed in the repo's `release = [...]` in `workspace.tom
 ## Steps
 
 1. **Pick repo and destination.** The repo is `$ARGUMENTS`, or the one you are in. If it has more than one release branch and the user did not say which, ask (one short question: qa or main) and pass `--to`. "Production" normally means `main`; if unsure, ask.
-2. **Show what goes up**: `ms-workspace release status <repo> --fetch`. Tell the user in a few lines: how many commits wait, the mix by type, any `BREAKING` line and any hotfix drift (commits only on the release branch). If it says up to date, stop there.
+2. **Show what goes up**: `ms-workspace release status <repo> --fetch`. Tell the user in a few lines (a long list can go through `dynamia:summarizer` first): how many commits wait, the mix by type, any `BREAKING` line and any hotfix drift (commits only on the release branch). If it says up to date, stop there.
 3. **Open the PR with one confirmation.** Run `ms-workspace promote <repo> --to <branch> --yes`. Claude Code's permission prompt for this command (`promote` is in `ask` on purpose) is the single "are you sure?": do not add an `AskUserQuestion` and do not try to avoid the prompt. Before it, confirm the repository and target branch in your text, as the global rules require.
    - Without `--title`/`--body-file`, the title is "Promote <base> to <branch>" and the body lists the commits by type with breaking changes first. Pass your own only if the user wants different text.
    - Local commits on the base branch that are not pushed are not promoted; the plan warns about them. Tell the user.

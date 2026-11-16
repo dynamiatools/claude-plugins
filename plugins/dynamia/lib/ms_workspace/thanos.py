@@ -42,11 +42,13 @@ from .usage import cache_dir
 
 UNTIL_USAGE_STEPS = 10000
 MAX_WAITS = 30
-DEFAULTS = {"max_steps": 30, "max_opus": 3, "push_every": 3, "stale_hours": 12}
+DEFAULTS = {"max_steps": 30, "max_opus": 3, "max_cheap": 40, "push_every": 3, "stale_hours": 12}
 SIZES = {"S": 2, "M": 4, "L": 8}
 LEDGER, STATE = "THANOS.md", ".thanos.json"
 REPORT, ASKED, LAST_BLOCK = "THANOS-REPORT.md", ".thanos-asked.jsonl", ".thanos-last-block.json"
 OPUS_AGENTS = ("dynamia:boss", "boss")
+# Cheap read-only helpers on Haiku: they may be launched (also in the background) without counting as Opus reviews, up to max_cheap launches.
+CHEAP_AGENTS = {p + n for n in ("scout", "summarizer", "test-triage", "log-triage", "pre-review", "runner") for p in ("", "dynamia:")}
 TASK = re.compile(r"^\s*-\s*\[( |x|X|!)\]\s*(?:\[([SMLsml])\]\s*)?(.*)$")
 
 TEMPLATE = """# THANOS mission: {batch}
@@ -317,7 +319,7 @@ def _start(ws: Workspace, args: list[str], extra: dict | None = None) -> int:
     deny = [args[i + 1] for i, a in enumerate(args) if a == "--deny-host" and i + 1 < len(args)] + list(ws.get("thanos", "deny_hosts", default=[]))
     st = {"batch": batch, "branch": int_branch(ws, batch, repos[0]), "goal": goal, "status": "working", "started": int(time.time()),
           "steps": 0, "max_steps": max_steps, "opus_used": opus_used, "max_opus": max_opus, "until_usage": until, "push_every": _opt(args, "--push-every", cfg(ws, "push_every"), int),
-          "tasks_done": 0, "stalls": 0, "signature": "", "deny_hosts": deny, "stale_hours": cfg(ws, "stale_hours"), "blockers": 0, "generation": 1, "procs": [], **(extra or {})}
+          "max_cheap": cfg(ws, "max_cheap"), "cheap_used": 0, "tasks_done": 0, "stalls": 0, "signature": "", "deny_hosts": deny, "stale_hours": cfg(ws, "stale_hours"), "blockers": 0, "generation": 1, "procs": [], **(extra or {})}
     _save(bp, st)
     if not ledger_path(bp).is_file():
         ledger_path(bp).write_text(TEMPLATE.format(batch=batch, goal=goal))
@@ -1089,11 +1091,27 @@ def hook_guard() -> int:
     return 0
 
 
+def _cheap_gate(m: dict, kind: str) -> int:
+    """A Haiku helper: allowed in the foreground or the background, never counted as an Opus review, capped so a loop cannot spawn forever."""
+    st = _read(Path(m["batch_path"]) / STATE) or m
+    cap = st.get("max_cheap", DEFAULTS["max_cheap"])
+    if st.get("cheap_used", 0) >= cap:
+        print(f"THANOS blocked: the {cap} cheap-agent launches of this mission are used. Do the rest yourself.", file=sys.stderr)
+        return 2
+    st["cheap_used"] = st.get("cheap_used", 0) + 1
+    _write(Path(m["batch_path"]) / STATE, {k: v for k, v in st.items() if k not in ("batch_path", "root", "sid")})
+    _emit({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                   "permissionDecisionReason": f"THANOS: cheap helper {kind} ({st['cheap_used']}/{cap}). Ask for a short report."}})
+    return 0
+
+
 def _agent_gate(m: dict, inp: dict) -> int:
     kind = inp.get("subagent_type") or ""
+    if kind in CHEAP_AGENTS:
+        return _cheap_gate(m, kind)
     if kind not in OPUS_AGENTS or inp.get("run_in_background"):
-        print("THANOS blocked: only the Opus reviewer (dynamia:boss), in the foreground, may be launched during a mission: other agents eat the context. "
-              "Search with Grep/Glob yourself.", file=sys.stderr)
+        print("THANOS blocked: only the Opus reviewer (dynamia:boss, in the foreground) and the cheap helpers (scout, summarizer, test-triage, log-triage, pre-review, "
+              "runner) may be launched during a mission: other agents eat the context.", file=sys.stderr)
         return 2
     st = _read(Path(m["batch_path"]) / STATE) or m
     if st["opus_used"] >= st["max_opus"]:

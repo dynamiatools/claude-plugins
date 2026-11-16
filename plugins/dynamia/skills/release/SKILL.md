@@ -12,6 +12,6 @@ ms-workspace release notes [repo]    # markdown grouped by commit type
 ```
 
 ## Steps
-1. Run `status`; summarize per repo in a few lines and call out breaking changes and hotfix drift (commits only on `qa`/`main`).
+1. Run `status`; summarize per repo in a few lines (for a long list hand the output to `dynamia:summarizer`, at most 10 lines, and check its breaking-change and hotfix-drift lines against the output yourself) and call out breaking changes and hotfix drift (commits only on `qa`/`main`).
 2. Run `notes` only when asked; print the markdown as is.
 3. This only reads. Promoting to `qa`/`main` is done by the user.

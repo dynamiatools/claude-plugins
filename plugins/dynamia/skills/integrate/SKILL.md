@@ -19,7 +19,7 @@ Joins agent work into the batch branch (`<type>/<batch>`) and validates it. Loca
 3. **Integrate**: `ms-workspace integrate <batch>`.
    - On `CONFLICT <branch> -> <files>`: the earlier branches are already merged. Open only the conflicting files, resolve them by keeping both intents (ask the user when intent is unclear), commit in the batch worktree, and run step 3 again. Do not use `--force` style shortcuts.
 
-4. **Validate**: `ms-workspace test t1 <batch>`.
+4. **Validate**: `ms-workspace test t1 <batch>` (a long run may go to `dynamia:runner` in the background while you prepare the report).
    - On failure, delegate the first analysis to the `dynamia:test-triage` agent (cheap model) with the printed output, then fix only what it points to.
 
 5. **Report** in at most 6 lines: merged branches, conflicts resolved, t1 result quoted from the command output (never "should pass"), and anything skipped or not verified. If everything passed, suggest `/dynamia:ship <batch>`.
