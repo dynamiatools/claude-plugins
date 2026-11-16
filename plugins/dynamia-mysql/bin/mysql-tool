@@ -22,8 +22,10 @@ argv, in the output or in this tool's config: a profile names a secret, the secr
   mysql-tool monitor P [P ...] [--max-lag N]  one line per server, exit 1 on any problem
   mysql-tool scan-secrets [PATH ...]          finds passwords left in files, never prints them
 
+  mysql-tool exec-test P "<destructive SQL>"  DROP, TRUNCATE, DELETE, UPDATE, RESET, PURGE, only on a profile marked env = "test"
+
 SQL text may contain '@@ENV:NAME@@', replaced at run time by the escaped secret NAME.
-Destructive statements are never run by this tool.
+Destructive statements are never run by this tool, except through exec-test on a profile the user marked env = "test".
 """
 import argparse
 import getpass
@@ -37,6 +39,7 @@ import string
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 
 MIN_MYSQL = (8, 4)
@@ -96,6 +99,10 @@ def load_profiles():
         bad = [k for k in prof if "pass" in k.lower() or "pwd" in k.lower()]
         if bad:
             raise Fail("profile %s has %s: passwords never go in the profile; use secret = \"NAME\"" % (name, bad[0]))
+        if prof.get("env", "prod") not in ("prod", "test"):
+            raise Fail("profile %s: env must be \"prod\" (the default) or \"test\"" % name)
+        if "confirm" in prof and (not isinstance(prof["confirm"], bool) or (prof["confirm"] is False and prof.get("env") != "test")):
+            raise Fail("profile %s: confirm must be true or false, and false only with env = \"test\"" % name)
     return profiles
 
 
@@ -415,6 +422,48 @@ def check_write(sql):
         if not (check_change(s) or any(rx.match(s) for rx in WRITE_OK)):
             raise Fail("statement not in the replication-setup allowlist (or a value is not allowed): %.60s" % s)
     return stmts
+
+
+# Destructive statements, runnable only on a profile marked env = "test" (the user's own declaration in profiles.toml).
+SYSTEM_SCHEMAS = {"mysql", "sys", "information_schema", "performance_schema"}
+IDENT = r"`?[\w$]+`?(?:\.`?[\w$]+`?)?"
+DESTROY_OK = [re.compile(p, re.I) for p in (
+    r"^drop\s+(?:database|schema)\s+(?:if\s+exists\s+)?(%s)$" % IDENT,
+    r"^drop\s+(?:table|view)\s+(?:if\s+exists\s+)?(%s(?:\s*,\s*%s)*)$" % (IDENT, IDENT),
+    r"^truncate\s+(?:table\s+)?(%s)$" % IDENT,
+    r"^delete\s+from\s+(%s)(?:\s+where\s+.+|\s+limit\s+\d+)?$" % IDENT,
+    r"^update\s+(%s)\s+set\s+.+$" % IDENT,
+    r"^reset\s+(?:binary\s+logs\s+and\s+gtids|master)$",
+    r"^purge\s+(?:binary|master)\s+logs\s+(?:to|before)\s+'[^']+'$",
+)]
+
+
+def check_destructive(sql, prof):
+    """The one destructive statement exec-test may run. Never touches the server's own system schemas, never expands secrets."""
+    stmts = split_statements(sql)
+    if len(stmts) != 1:
+        raise Fail("exec-test takes exactly one statement")
+    s = stmts[0]
+    if "@@ENV:" in s:
+        raise Fail("exec-test does not expand secrets; a destructive statement has no use for one")
+    m = next((x for x in (rx.match(s) for rx in DESTROY_OK) if x), None)
+    if not m:
+        raise Fail("exec-test runs DROP DATABASE/SCHEMA/TABLE/VIEW, TRUNCATE, DELETE FROM, UPDATE, RESET BINARY LOGS AND GTIDS and PURGE BINARY LOGS only: %.60s" % s)
+    whole_db = re.match(r"drop\s+(?:database|schema)", s, re.I)
+    for name in (m.group(1).split(",") if m.groups() else []):
+        parts = name.strip().replace("`", "").split(".")
+        schema = parts[0] if len(parts) == 2 or whole_db else (prof.get("database") or "")
+        if schema.lower() in SYSTEM_SCHEMAS:
+            raise Fail("exec-test never touches the system schema %s" % schema)
+    return s
+
+
+def log_exec_test(name, stmt):
+    """A private trail of what exec-test ran, next to the secrets."""
+    os.makedirs(HOME(), mode=0o700, exist_ok=True)
+    fd = os.open(os.path.join(HOME(), "exec-test.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
+        fh.write("%s\t%s\t%s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), name, stmt[:200]))
 
 
 # ---- facts about a server -------------------------------------------------------------------
@@ -1283,6 +1332,7 @@ def main(argv=None):
         p = sub.add_parser(n); p.add_argument("profile"); p.add_argument("--json", action="store_true"); p.add_argument("--max-lag", type=int, default=30)
     p = sub.add_parser("query"); p.add_argument("profile"); p.add_argument("sql"); p.add_argument("--json", action="store_true")
     p = sub.add_parser("exec"); p.add_argument("profile"); p.add_argument("sql")
+    p = sub.add_parser("exec-test"); p.add_argument("profile"); p.add_argument("sql")
     p = sub.add_parser("plan-replica"); p.add_argument("--source", required=True); p.add_argument("--replica", required=True)
     p.add_argument("--method", required=True, choices=("xtrabackup", "mariabackup", "clone", "dump"))
     p.add_argument("--rebuild", action="store_true", help="the replica may hold data that will be replaced (only after the user agreed)")
@@ -1304,7 +1354,7 @@ def main(argv=None):
     try:
         if a.cmd == "profiles":
             for n, pr in sorted(load_profiles().items()):
-                print("%s\t%s@%s:%s\tsecret=%s" % (n, pr.get("user"), pr.get("host", "127.0.0.1"), pr.get("port", 3306), pr.get("secret") or pr.get("login_path") or "-"))
+                print("%s\t%s@%s:%s\tsecret=%s" % (n, pr.get("user"), pr.get("host", "127.0.0.1"), pr.get("port", 3306), pr.get("secret") or pr.get("login_path") or "-") + ("\tenv=test" if pr.get("env") == "test" else ""))
         elif a.cmd == "secrets":
             for n in sorted(load_secrets()):
                 print(n)
@@ -1337,6 +1387,13 @@ def main(argv=None):
                     print(start_detached(prof, s))
                 else:
                     print(redact(run_sql(prof, s, readonly=False, timeout=300)).strip() or "ok: " + re.sub(r"'[^']*'", "'..'", s)[:70])
+        elif a.cmd == "exec-test":
+            prof = get_profile(a.profile)
+            if prof.get("env") != "test":
+                raise Fail("profile %s is not marked env = \"test\" in profiles.toml: destructive statements are never run on it; the user runs them by hand" % a.profile)
+            stmt = check_destructive(a.sql, prof)
+            log_exec_test(a.profile, stmt)
+            print(redact(run_sql(prof, stmt, readonly=False, timeout=300)).strip() or "ok: " + stmt[:70])
         elif a.cmd == "plan-replica":
             text, ok = plan(a.source, a.replica, a.method, a.rebuild, a.allow_plaintext)
             print(text)

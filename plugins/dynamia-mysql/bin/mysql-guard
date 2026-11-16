@@ -5,6 +5,8 @@ Silent unless the command touches a MySQL-family tool, a datadir or this plugin'
   deny  (exit 2)  a password in argv or SQL text, reading secrets or credential files, reading account
                   hashes, and destructive statements (DROP, TRUNCATE, DELETE/UPDATE without WHERE,
                   RESET BINARY LOGS, PURGE BINARY LOGS, recursive rm of a datadir)
+  exec-test       `mysql-tool exec-test PROFILE "SQL"` runs a destructive statement only on a profile marked env = "test" in
+                  profiles.toml: asked every time, or silent with confirm = false on a local test profile
   ask   (JSON)    anything else that changes state: write SQL, SHUTDOWN, restart or stop of the server,
                   moving or copying a datadir, restoring, backups, CLONE, replication changes, pt-* --execute
 Read-only mysql-tool subcommands skip the SQL rules because the tool enforces read-only itself.
@@ -12,6 +14,7 @@ Fails open: any error means exit 0. It is a guard against mistakes, not a sandbo
 from pieces at run time, an encoded string or a script file can slip past a text match.
 """
 import json
+import os
 import re
 import sys
 
@@ -74,6 +77,32 @@ ASK = [
 ]
 
 
+# `mysql-tool exec-test PROFILE "<one quoted statement>"` and nothing else on the line (quoted text already blanked).
+EXEC_TEST = re.compile(r"^\s*(?:python3?\s+)?(?:\S*/)?mysql-tool\s+exec-test\s+([\w.-]+)\s+''\s*$")
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+DENY_HINT = "; on a profile the user marked env = \"test\" in profiles.toml, run it with: mysql-tool exec-test PROFILE \"SQL\""
+
+
+def exec_test_decision(name):
+    """Destructive SQL through the tool: only for a profile marked env = "test". It asks every time, unless the user set
+    confirm = false on a local test profile. The tool checks the profile again itself, so this is not the only barrier."""
+    try:
+        import tomllib
+        home = os.environ.get("DYNAMIA_MYSQL_HOME") or os.path.join(os.path.expanduser("~"), ".config", "dynamia-mysql")
+        with open(os.path.join(home, "profiles.toml"), "rb") as fh:
+            profiles = tomllib.load(fh).get("profiles", {})
+    except Exception:
+        return "ask", ["destructive SQL on profile %s (profiles.toml could not be read; the tool will check env = test)" % name]
+    prof = profiles.get(name)
+    if prof is None:
+        return "deny", ["profile %s does not exist" % name]
+    if prof.get("env") != "test":
+        return "deny", ["destructive SQL on profile %s, which is not marked env = \"test\" (the user runs it by hand)" % name]
+    if prof.get("confirm") is False and prof.get("host", "127.0.0.1") in LOCAL_HOSTS:
+        return None
+    return "ask", ["destructive SQL on test profile %s" % name]
+
+
 def segments(cmd):
     return [x for x in (s.strip() for s in SPLIT.split(cmd)) if x]
 
@@ -119,6 +148,9 @@ def check(tool, ti):
     bare = re.sub(r"'[^']*'|\"[^\"]*\"", "''", norm)
     deny = [why for rx, why, fl in DENY_ARGV if re.search(rx, bare, fl)]
     deny += [why for rx, why in DENY_TEXT if re.search(rx, norm, I)]
+    et = EXEC_TEST.match(bare)
+    if et:
+        return ("deny", deny) if deny else exec_test_decision(et.group(1))
     if read_only_tool(cmd):
         return ("deny", deny) if deny else None
     deny += [why for rx, why in DENY_SQL if re.search(rx, norm, I)]
@@ -128,6 +160,9 @@ def check(tool, ti):
         return "deny", deny
     ask = [why for rx, why in ASK if re.search(rx, norm, I)]
     return ("ask", ask) if ask else None
+
+
+DESTRUCTIVE = {why for _, why in DENY_SQL} | {"DELETE or UPDATE without WHERE"}
 
 
 def main():
@@ -140,9 +175,10 @@ def main():
         return 0
     kind, reasons = res
     if kind == "deny":
+        hint = DENY_HINT if any(r in DESTRUCTIVE for r in reasons) else ""
         print("Blocked by dynamia-mysql: %s. Never put passwords in commands (use the secrets file and "
-              "'@@ENV:NAME@@'), and destructive statements are for the user to run, not for the agent."
-              % "; ".join(sorted(set(reasons))), file=sys.stderr)
+              "'@@ENV:NAME@@'), and destructive statements are for the user to run, not for the agent%s."
+              % ("; ".join(sorted(set(reasons))), hint), file=sys.stderr)
         return 2
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse", "permissionDecision": "ask",
