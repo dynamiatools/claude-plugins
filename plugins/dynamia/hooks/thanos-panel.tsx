@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, On, Timer } from 'claude-code'
 
 import type { ThanosView } from './thanos-view'
-import { bar, clip, counts, glyph, killArgv, panelArgv, parsePanel, splitTask, statusLine } from './thanos-view'
+import { bar, clip, counts, glyph, killArgv, panelArgv, parsePanel, splitTask, statusLine, wrap } from './thanos-view'
 
 const PANE = 'dynamia-thanos'
 const EVERY_MS = 3000
@@ -89,7 +89,22 @@ export function registerThanos(on: On) {
     // Keep the running task and the open ones in view; finished ones scroll away first.
     const firstOpen = Math.max(0, v.tasks.findIndex(t => t.mark === ' '))
     const from = Math.min(Math.max(0, firstOpen - 2), Math.max(0, v.tasks.length - room))
-    const shown = v.tasks.slice(from, from + room)
+    // Long task text wraps onto the next lines, so the window is counted in lines, not tasks.
+    const rows = v.tasks.map(t => {
+      const { name, what } = splitTask(t.text)
+      const head = `${glyph(t)} ${t.size !== '' ? `[${t.size}] ` : ''}`
+      const lines = wrap(`${head}${name}`, width).map((l, i) => (i === 0 ? l : `  ${l}`))
+      const extra = t.active && what !== '' ? wrap(what, width - 2).map(l => `  ${l}`) : []
+
+      return { t, lines, extra }
+    })
+    const shown: typeof rows = []
+    for (let used = 0, i = from; i < rows.length; i++) {
+      const n = rows[i].lines.length + rows[i].extra.length
+      if (shown.length > 0 && used + n > room) break
+      shown.push(rows[i])
+      used += n
+    }
     const tone = v.mission.status === 'working' ? 'magenta' : v.mission.status === 'done' ? 'green' : 'yellow'
 
     return (
@@ -117,17 +132,20 @@ export function registerThanos(on: On) {
         <Box flexDirection="column">
           {v.tasks.length === 0 && <Text dimColor>No tasks yet in THANOS.md.</Text>}
           {from > 0 && <Text dimColor>… {from} earlier</Text>}
-          {shown.map((t, i) => {
-            const { name, what } = splitTask(t.text)
-            return (
-              <Box key={`${from + i}`} flexDirection="column">
-                <Text color={t.mark === '!' ? 'red' : t.active ? 'magenta' : undefined} dimColor={t.mark === 'x'} bold={t.active}>
-                  {`${glyph(t)} ${t.size !== '' ? `[${t.size}] ` : ''}${clip(name, width - 8)}`}
+          {shown.map(({ t, lines, extra }, i) => (
+            <Box key={`${from + i}`} flexDirection="column">
+              {lines.map((l, j) => (
+                <Text key={String(j)} color={t.mark === '!' ? 'red' : t.active ? 'magenta' : undefined} dimColor={t.mark === 'x'} bold={t.active}>
+                  {l}
                 </Text>
-                {t.active && what !== '' && <Text dimColor>{clip(`  ${what}`, width)}</Text>}
-              </Box>
-            )
-          })}
+              ))}
+              {extra.map((l, j) => (
+                <Text key={`x${j}`} dimColor>
+                  {l}
+                </Text>
+              ))}
+            </Box>
+          ))}
           {from + shown.length < v.tasks.length && <Text dimColor>… {v.tasks.length - from - shown.length} more</Text>}
         </Box>
         {v.procs.length > 0 && (

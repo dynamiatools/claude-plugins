@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { bar, clip, counts, glyph, killArgv, panelArgv, parsePanel, splitTask, statusLine } from './thanos-view'
+import { bar, clip, counts, glyph, killArgv, panelArgv, parsePanel, splitTask, statusLine, wrap } from './thanos-view'
 
 const mission = { batch: 'b1', branch: 'feat/b1', goal: 'g', status: 'working', steps: 3, max_steps: 30, until_usage: 0, opus_used: 1, max_opus: 3, blockers: 0 }
 
@@ -32,6 +32,12 @@ describe('thanos panel helpers', () => {
   test('text and bar fit their width', async () => {
     expect(clip('abcdef', 4)).toBe('abc…')
     expect(clip('abc', 4)).toBe('abc')
+  })
+
+  test('wrap breaks long text onto more lines', async () => {
+    expect(wrap('one two three four', 9)).toEqual(['one two', 'three', 'four'])
+    expect(wrap('abcdefghij', 4)).toEqual(['abcd', 'efgh', 'ij'])
+    expect(wrap('', 5)).toEqual([''])
     expect(bar(1, 4, 8)).toBe('██░░░░░░')
     expect(bar(0, 0, 4)).toBe('░░░░')
     expect(statusLine(mission)).toBe('working · step 3 of 30 · Opus 1/3')

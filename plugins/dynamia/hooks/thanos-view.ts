@@ -63,6 +63,33 @@ export function clip(text: string, width: number): string {
   return text.length <= width ? text : `${text.slice(0, Math.max(1, width - 1))}…`
 }
 
+// Word-wraps text into lines of at most `width` chars; a word longer than a line is split.
+export function wrap(text: string, width: number): string[] {
+  const w = Math.max(1, width)
+  const lines: string[] = []
+  let line = ''
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    let rest = word
+    while (rest.length > w) {
+      if (line !== '') {
+        lines.push(line)
+        line = ''
+      }
+      lines.push(rest.slice(0, w))
+      rest = rest.slice(w)
+    }
+    if (line === '') line = rest
+    else if (line.length + 1 + rest.length <= w) line += ` ${rest}`
+    else {
+      lines.push(line)
+      line = rest
+    }
+  }
+  if (line !== '' || lines.length === 0) lines.push(line)
+
+  return lines
+}
+
 export function bar(done: number, total: number, width: number): string {
   const cells = Math.max(1, width)
   const filled = total <= 0 ? 0 : Math.round((done / total) * cells)
