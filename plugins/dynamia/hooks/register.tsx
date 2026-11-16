@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { DevVar, Draft } from '../types'
 import { addArgv, listArgv, parseAdd, parseListing, rmArgv } from './devenv'
 import { panelInput, panelPress, panelSelect, registerPanelCommands, registerPanels } from './panels'
+import { registerThanos, registerThanosCommands, thanosPress } from './thanos-panel'
 
 const vars = atom({ plugin: 'dynamia', key: 'vars' } as const, [] as DevVar[])
 const repos = atom({ plugin: 'dynamia', key: 'repos' } as const, [] as string[])
@@ -49,6 +50,7 @@ async function add($: EngineInterface) {
 
 export const register: Register = on => {
   registerPanels(on)
+  registerThanos(on)
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -56,6 +58,7 @@ export const register: Register = on => {
       description: 'Development variables of the workspace: a panel, or dynamia-env-panel NAME=value [repo], rm NAME [repo], list',
     })
     await registerPanelCommands($)
+    await registerThanosCommands($)
 
     return next(e)
   })
@@ -119,6 +122,7 @@ export const register: Register = on => {
       await refresh($)
     }
     await panelPress($, e.element)
+    await thanosPress($, e.element)
 
     return next(e)
   })

@@ -59,7 +59,7 @@ Usage:
   ms-workspace release status|notes [repo]   what waits to be promoted from the base branch to qa/main, grouped by commit type, and release notes
   ms-workspace notify <message> [--title T] | --test | --hook   send a notification (ntfy, webhook or local command from [notify]); also a Notification hook
   ms-workspace doctor                        check tools, versions, resources and workspace.toml
-  ms-workspace thanos start|resume|estimate|status|task|block|pause|done|stop   autonomous mission in its own batch (strict guard, step cap, Opus reviews)
+  ms-workspace thanos start|resume|extend|estimate|status|task|block|unblock|wait|run|procs|kill|allow-suggest|pause|done|stop|panel  autonomous mission in its own batch (strict guard, step cap, Opus reviews)
   ms-workspace guard                         PreToolUse hook in batch worktrees: asks before pushing a work branch, blocks pushes to base/force and gh pr create|merge
 
 Workspace discovery: $MS_WORKSPACE, else the nearest parent holding .dynamia/workspace.toml (or, older layout, workspace.toml).
