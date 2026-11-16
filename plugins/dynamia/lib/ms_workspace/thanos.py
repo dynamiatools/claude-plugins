@@ -159,9 +159,15 @@ def tasks(batch_path: Path) -> list[dict]:
         lines = ledger_path(batch_path).read_text().splitlines()
     except OSError:
         return []
-    out = []
+    # Only the "## Tasks" section holds tasks: the checkboxes under "Success criteria" are not tasks.
+    # shortcut: a ledger without a "## Tasks" heading keeps the old behavior (every checkbox); drop it once all ledgers have the heading.
+    has_section = any(line.strip() == "## Tasks" for line in lines)
+    out, inside = [], not has_section
     for n, line in enumerate(lines):
-        m = TASK.match(line)
+        if has_section and line.startswith("## "):
+            inside = line.strip() == "## Tasks"
+            continue
+        m = TASK.match(line) if inside else None
         if m:
             out.append({"line": n, "mark": m.group(1).lower(), "size": (m.group(2) or "").upper(), "text": m.group(3).strip()})
     return out

@@ -5274,6 +5274,14 @@ class TestThanos(Base):
         self.assertIn("1 uncommitted", out)
         self.assertIn("thanos task done login", out)
 
+    def test_success_criteria_checkboxes_are_not_tasks(self):
+        d = self.start()
+        led = (d / "THANOS.md").read_text()
+        (d / "THANOS.md").write_text(led.replace("## Tasks", "## Success criteria\n- [ ] it works end to end\n\n## Tasks", 1) if "## Tasks" in led else led)
+        self.tasks(d, "- [ ] [S] login: add it")
+        out = self.ws.ms("thanos", "resume", "b1").stdout
+        self.assertIn("0 done / 1 open", out)
+
     def test_unblock_opens_a_parked_task_again(self):
         d = self.start()
         self.tasks(d, "- [ ] [S] mail: smtp")
