@@ -30,6 +30,8 @@ user = "dba_ro"
 secret = "PROD_DB_PW"
 ssl_mode = "REQUIRED"      # optional. A MariaDB 11.x client insists on TLS: for a server without it (MariaDB 10.x by default) set "DISABLED", only on a trusted network
 # client = "mariadb"       # optional, default: mysql, then mariadb
+# env = "test"             # optional, default "prod". Only the user marks a server as disposable; it allows `mysql-tool exec-test` there
+# confirm = false          # optional, only with env = "test" on localhost: exec-test then runs without asking. Leave it off unless the user asks
 ```
 
 3. Check it: `python3 ${CLAUDE_PLUGIN_ROOT}/bin/mysql-tool info prod`. Report flavor, version, whether it is supported, `server_id`, binary log and GTID state.
