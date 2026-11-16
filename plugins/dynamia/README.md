@@ -78,13 +78,16 @@ These read `workspace.toml`. Without one the tool answers `no .dynamia/workspace
 
 ## Agents
 
-Read-only helpers. The first three run on Haiku so the main model does not spend tokens on reading and summarizing.
+Read-only helpers. All but `boss` run on Haiku so the main model does not spend tokens on reading and summarizing.
 
 | Agent | Use |
 |---|---|
 | `dynamia:scout` | Finds where code lives: paths and one line each |
 | `dynamia:test-triage` | Classifies a failing run (code, test, flaky, environment, config, build) and points to the file |
-| `dynamia:summarizer` | Condenses diffs, history and logs; drafts commit messages in each repo's style |
+| `dynamia:summarizer` | Condenses diffs, history and logs; drafts commit messages, PR bodies and release notes in each repo's style |
+| `dynamia:log-triage` | Reads a long log (Docker, a dev server, CI) and gives the first real error, its class and the file |
+| `dynamia:pre-review` | Cheap check before the Opus review: leftovers, TODOs, risky code without tests, and which areas boss should read |
+| `dynamia:runner` | Starts and watches a slow command (full tests, a build, a dev server) and returns a short report, so the main thread keeps working |
 | `dynamia:boss` | Opus architecture review of a batch, diff or design: verdict, blocking and should-fix findings |
 
 ## Guard rails

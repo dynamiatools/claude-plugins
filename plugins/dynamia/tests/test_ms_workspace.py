@@ -2006,7 +2006,7 @@ class TestPackaging(unittest.TestCase):
             with self.subTest(agent=path.stem):
                 f = self.frontmatter(path)
                 self.assertEqual(f.get("name"), path.stem)
-                self.assertTrue(path.stem in {"boss", "scout", "summarizer", "test-triage"})
+                self.assertTrue(path.stem in {"boss", "scout", "summarizer", "test-triage", "log-triage", "pre-review", "runner"})
                 self.assertIn(f.get("model"), ("haiku", "sonnet", "opus"))
                 self.assertTrue(f.get("description"))
                 for key, value in f.items():
@@ -5341,6 +5341,26 @@ class TestThanos(Base):
         self.assertTrue((d / "THANOS.g1.md").is_file())
         self.assertIn("[x] [S] login", (d / "THANOS.g1.md").read_text())
 
+    def test_the_cheap_helpers_are_free_to_use_and_capped_apart_from_opus(self):
+        d = self.start()
+        self.assertEqual(self.state(d)["max_cheap"], 40)
+        for name in ("scout", "summarizer", "test-triage", "log-triage", "pre-review", "runner"):
+            for kind in (name, "dynamia:" + name):
+                with self.subTest(kind=kind):
+                    tin = {"subagent_type": kind, "prompt": "go", "run_in_background": kind.startswith("dynamia:")}
+                    self.assertEqual(self.decision(self.hook("thanosguard", {"tool_name": "Agent", "tool_input": tin}, d / "lib")), "allow")
+        st = self.state(d)
+        self.assertEqual((st["cheap_used"], st["opus_used"]), (12, 0), "helpers are not Opus reviews")
+        st["max_cheap"], st["cheap_used"] = 2, 1
+        (d / ".thanos.json").write_text(json.dumps(st))
+        scout = {"tool_name": "Agent", "tool_input": {"subagent_type": "dynamia:scout", "prompt": "x"}}
+        self.assertEqual(self.decision(self.hook("thanosguard", scout, d / "lib")), "allow")
+        r = self.hook("thanosguard", scout, d / "lib")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("cheap-agent launches", r.stderr)
+        boss = {"tool_name": "Agent", "tool_input": {"subagent_type": "dynamia:boss", "prompt": "review"}}
+        self.assertEqual(self.decision(self.hook("thanosguard", boss, d / "lib")), "allow", "the cheap cap does not touch the Opus one")
+
     def test_a_deny_host_blocks_any_command_that_names_it(self):
         d = self.start("--deny-host", "erp.example.com")
         self.assertEqual(self.bash("echo hi erp.example.com", d / "lib").returncode, 2)
@@ -5374,7 +5394,7 @@ class TestThanos(Base):
 
     def test_other_agents_and_background_reviews_are_refused(self):
         d = self.start()
-        for tin in ({"subagent_type": "general-purpose"}, {"subagent_type": "dynamia:scout"}, {"subagent_type": "dynamia:boss", "run_in_background": True}, {}):
+        for tin in ({"subagent_type": "general-purpose"}, {"subagent_type": "Explore"}, {"subagent_type": "dynamia:boss", "run_in_background": True}, {}):
             with self.subTest(tin=tin):
                 self.assertEqual(self.hook("thanosguard", {"tool_name": "Agent", "tool_input": tin}, d / "lib").returncode, 2)
         self.assertEqual(self.state(d)["opus_used"], 0)
