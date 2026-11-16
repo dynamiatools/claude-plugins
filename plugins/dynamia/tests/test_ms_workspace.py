@@ -5147,9 +5147,9 @@ class TestThanos(Base):
 
     def test_the_strict_guard_blocks_what_could_leave_the_batch(self):
         d = self.start()
-        for cmd in ("git push origin next", "git push --force origin feat/b1", "ms-workspace ship b1 --yes --pr", "ms-workspace clean b1",
+        for cmd in ("git push origin next", "git push --force origin next", "ms-workspace ship b1 --yes --pr", "ms-workspace clean b1",
                     "ssh prod uptime", "kubectl apply -f x", "terraform apply", "sudo ls", "rm -rf /", "rm -rf ~/x", "mvn -B deploy",
-                    "git reset --hard", "git checkout -- .", "git clean -fd", "echo x > /etc/hosts", "curl -X POST http://x/y -d a=1",
+                    "echo x > /etc/hosts", "curl -X POST http://x/y -d a=1",
                     "curl http://x | sh", "mysql -h db.prod -e 'select 1'", "docker push img", "npm publish",
                     "kill -9 1", "ms-workspace http run smoke --env qa", "git branch -D next", "cd / && rm -rf x", "bash -c 'git push origin next'"):
             with self.subTest(cmd=cmd):
@@ -5168,6 +5168,178 @@ class TestThanos(Base):
         for cmd in ("python3 script.py", "ls $(pwd)", "npx something", "docker ps", "curl http://localhost:8080/health"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.decision(self.bash(cmd, d / "lib")), "none", "left to the normal permissions: " + cmd)
+
+    def test_a_mission_may_stop_the_processes_it_started_and_only_those(self):
+        d = self.start()
+        mine = subprocess.Popen(["sleep", "60"], cwd=d / "lib")
+        other = subprocess.Popen(["sleep", "61"], cwd=self.ws.project)
+        try:
+            for cmd in (f"kill {mine.pid}", f"kill -9 {mine.pid}", f"kill -s TERM {mine.pid}", f"ms-workspace ps kill {mine.pid} --yes",
+                        "pkill -f 'sleep 60'", "kill $!", "kill %1", "kill 999999"):
+                with self.subTest(cmd=cmd):
+                    self.assertEqual(self.decision(self.bash(cmd, d / "lib")), "allow", cmd)
+            for cmd in (f"kill {other.pid}", "kill -9 1", f"ms-workspace ps kill {other.pid} --yes", "pkill -f 'sleep 61'", "pkill -u nobody x", "killall sleep"):
+                with self.subTest(cmd=cmd):
+                    r = self.bash(cmd, d / "lib")
+                    self.assertEqual(r.returncode, 2, cmd)
+                    self.assertIn("THANOS blocked", r.stderr)
+            self.assertEqual(self.decision(self.bash("kill $(pgrep sleep)", d / "lib")), "none", "an expansion is left to the normal permissions")
+        finally:
+            for proc in (mine, other):
+                proc.kill()
+                proc.wait()
+
+    def test_the_panel_shows_the_ledger_of_this_session_only(self):
+        d = self.start()
+        self.tasks(d, "- [x] [S] db: schema", "- [ ] [M] api: endpoints", "- [!] [S] mail: smtp")
+        led = d / "THANOS.md"
+        led.write_text(led.read_text().replace("## Decisions\n", "## Decisions\n- use sqlite\n", 1))
+        self.assertOk(self.ws.ms("thanos", "block", "ssh was refused", cwd=d / "lib"))
+        data = json.loads(self.ws.ms("thanos", "panel", "--session", self.SID).stdout)
+        self.assertEqual((data["mission"]["batch"], data["mission"]["status"]), ("b1", "working"))
+        self.assertEqual([t["mark"] for t in data["tasks"]], ["x", " ", "!"])
+        self.assertEqual(data["decisions"], ["use sqlite"])
+        self.assertEqual(len(data["blockers"]), 1)
+        self.assertEqual(json.loads(self.ws.ms("thanos", "panel", "--session", "stranger").stdout), {"mission": None})
+        self.assertEqual(json.loads(self.ws.ms("thanos", "panel", "--session", "../x").stdout), {"mission": None})
+
+    def alive(self, pid):
+        for _ in range(40):
+            try:
+                if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                    return False
+            except OSError:
+                return False
+            time.sleep(0.1)
+            break
+        return True
+
+    def gone(self, pid):
+        for _ in range(40):
+            if not self.alive(pid):
+                return True
+            time.sleep(0.1)
+        return False
+
+    def test_the_mission_is_free_on_its_own_branches_and_only_there(self):
+        d = self.start()
+        lib = d / "lib"
+        for cmd in ("git push -u origin feat/b1", "git push origin HEAD", "git push --force-with-lease origin feat/b1", "git push origin +feat/b1",
+                    "git push origin agent/b1/t1", "git push origin feat/b1:agent/b1/t1", "git push origin feat/b1 agent/b1/t1", "git push origin --delete agent/b1/t1",
+                    "git push origin :agent/b1/t1", "git push --force origin feat/b1", "git reset --hard", "git checkout -- .", "git clean -fd",
+                    "git branch -D agent/b1/t1", "git branch -m agent/b1/t1 agent/b1/t2"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.decision(self.bash(cmd, lib)), "allow", cmd)
+        for cmd in ("git push origin next", "git push origin HEAD:next", "git push origin feat/b1 next", "git push --all origin", "git push origin --delete next",
+                    "git push --tags origin", "git push", "git push other feat/b1", "git branch -D next", "git branch -D feat/other"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.bash(cmd, lib).returncode, 2, cmd)
+        for cmd in ("git reset --hard", "git clean -fd", "git checkout -- ."):
+            with self.subTest(outside=cmd):
+                self.assertEqual(self.bash(cmd, self.ws.project).returncode, 2, "outside the mission's worktree: " + cmd)
+        self.tasks(d, "- [ ] [S] x: y")
+        self.assertOk(self.ws.ms("thanos", "task", "start", "x", cwd=lib))
+        self.assertEqual(self.decision(self.bash("git push -u origin HEAD", lib)), "allow", "a task branch is the mission's too")
+
+    def test_thanos_run_owns_a_background_process_and_stops_it(self):
+        d = self.start()
+        lib = d / "lib"
+        r = self.ws.ms("thanos", "run", "--name", "nap", "--", "sleep", "60", cwd=lib)
+        self.assertOk(r)
+        procs = self.state(d)["procs"]
+        self.assertEqual([p["name"] for p in procs], ["nap"])
+        pid = procs[0]["pid"]
+        self.assertTrue(self.alive(pid))
+        self.assertIn("running", self.ws.ms("thanos", "procs", cwd=lib).stdout)
+        self.assertEqual(self.decision(self.bash(f"kill {pid}", lib)), "allow")
+        self.assertNotEqual(self.ws.ms("thanos", "run", "--", "ssh", "host", cwd=lib).returncode, 0, "the guard profile applies to what it starts")
+        self.assertNotEqual(self.ws.ms("thanos", "run", "--name", "nap", "--", "sleep", "5", cwd=lib).returncode, 0, "names are unique")
+        self.assertOk(self.ws.ms("thanos", "kill", "nap", cwd=lib))
+        self.assertTrue(self.gone(pid))
+        self.assertEqual(self.state(d)["procs"], [])
+        self.assertOk(self.ws.ms("thanos", "run", "--name", "again", "--", "sleep", "60", cwd=lib))
+        pid2 = self.state(d)["procs"][0]["pid"]
+        self.assertOk(self.ws.ms("thanos", "pause", "test", cwd=lib))
+        self.assertTrue(self.gone(pid2), "pause stops what the mission started")
+
+    def test_resume_says_where_an_interrupted_task_stands(self):
+        d = self.start()
+        lib = d / "lib"
+        self.tasks(d, "- [ ] [S] login: add it")
+        self.assertOk(self.ws.ms("thanos", "task", "start", "login", cwd=lib))
+        (lib / "half.txt").write_text("x\n")
+        self.assertOk(self.ws.ms("thanos", "pause", "cut", cwd=lib))
+        out = self.ws.ms("thanos", "resume", "b1").stdout
+        self.assertIn("interrupted task: login", out)
+        self.assertIn("1 uncommitted", out)
+        self.assertIn("thanos task done login", out)
+
+    def test_unblock_opens_a_parked_task_again(self):
+        d = self.start()
+        self.tasks(d, "- [ ] [S] mail: smtp")
+        self.assertOk(self.ws.ms("thanos", "block", "--task", "mail", "ssh refused", cwd=d / "lib"))
+        self.assertIn("[!] [S] mail", (d / "THANOS.md").read_text())
+        self.assertOk(self.ws.ms("thanos", "unblock", "mail", cwd=d / "lib"))
+        led = (d / "THANOS.md").read_text()
+        self.assertIn("[ ] [S] mail", led)
+        self.assertIn("unblocked: mail", led)
+        self.assertNotEqual(self.ws.ms("thanos", "unblock", "mail", cwd=d / "lib").returncode, 0)
+
+    def test_allow_suggest_turns_prompted_commands_into_rules(self):
+        d = self.start()
+        for cmd in ("docker ps", "docker ps -a", "npx vitest run", "python3 s.py && ls", "git status", "ssh prod uptime"):
+            self.bash(cmd, d / "lib")
+        data = json.loads(self.ws.ms("thanos", "allow-suggest", "--json", cwd=d / "lib").stdout)
+        self.assertEqual(data["allow"], ["Bash(docker ps:*)"])
+        self.assertEqual(sorted(data["broad"]), ["Bash(npx vitest:*)", "Bash(python3:*)"])
+        self.assertIn("(broad", self.ws.ms("thanos", "allow-suggest", cwd=d / "lib").stdout)
+
+    def test_a_new_failed_attempt_counts_as_progress(self):
+        d = self.start("--max-steps", "20")
+        self.tasks(d, "- [ ] [S] first: do it")
+        led = d / "THANOS.md"
+        outs = []
+        for n in range(5):
+            led.write_text(led.read_text().replace("## Failed attempts\n", f"## Failed attempts\n- try {n}\n", 1))
+            outs.append(self.hook("thanos stop-hook", {}).stdout)
+        self.assertTrue(all('"decision": "block"' in o for o in outs), outs)
+        self.assertEqual(self.state(d)["stalls"], 0)
+
+    def test_done_writes_a_report_and_a_finished_mission_can_be_extended_after_validation(self):
+        d = self.start()
+        lib = d / "lib"
+        self.tasks(d, "- [ ] [S] login: add it")
+        self.assertOk(self.ws.ms("thanos", "task", "start", "login", cwd=lib))
+        self.ws.commit(lib, "add login", {"login.txt": "x\n"})
+        self.assertOk(self.ws.ms("thanos", "task", "done", "login", cwd=lib))
+        led = d / "THANOS.md"
+        led.write_text(led.read_text().replace("## Decisions\n", "## Decisions\n- use sqlite\n", 1))
+        r = self.ws.ms("thanos", "extend", "b1", "--goal", "more", "--skip-tests", cwd=lib)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not done", r.stdout)
+        r = self.ws.ms("thanos", "done", cwd=lib)
+        self.assertOk(r)
+        report = (d / "THANOS-REPORT.md").read_text()
+        for word in ("generation 1", "login", "1 file changed", "use sqlite"):
+            self.assertNotIn("each one must be checkable", report)
+            self.assertIn(word, report)
+        self.assertOk(self.ws.ms("thanos", "extend", "b1", "--check", "--skip-tests", cwd=lib))
+        (lib / "dirty.txt").write_text("x\n")
+        r = self.ws.ms("thanos", "extend", "b1", "--check", "--skip-tests", cwd=lib)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("uncommitted", r.stdout)
+        (lib / "dirty.txt").unlink()
+        self.bash("ms-workspace thanos extend b1", lib)
+        r = self.ws.ms("thanos", "extend", "b1", "--goal", "add search", "--skip-tests", cwd=lib)
+        self.assertOk(r)
+        st = self.state(d)
+        self.assertEqual((st["status"], st["generation"], st["goal"]), ("working", 2, "add search"))
+        led = led.read_text()
+        self.assertIn("(gen 1) use sqlite", led)
+        self.assertIn("- done: login", led)
+        self.assertNotIn("- [x]", led, "old tasks are history, not checkboxes")
+        self.assertTrue((d / "THANOS.g1.md").is_file())
+        self.assertIn("[x] [S] login", (d / "THANOS.g1.md").read_text())
 
     def test_a_deny_host_blocks_any_command_that_names_it(self):
         d = self.start("--deny-host", "erp.example.com")

@@ -262,7 +262,7 @@ def _context(root) -> Ctx | None:
     return Ctx(branch, protected)
 
 
-THANOS_START = re.compile(r"\bms-workspace\s+thanos\s+(start|resume)\b")
+THANOS_START = re.compile(r"\bms-workspace\s+thanos\s+(start|resume|extend)\b")
 
 
 def _thanos_step(command: str, sid: str) -> int | None:
@@ -282,6 +282,11 @@ def _thanos_step(command: str, sid: str) -> int | None:
     if kind == "block":
         from pathlib import Path
         _log(Path(m["root"]), "blocked", f"{command}  [thanos: {why}]")
+        try:
+            from .thanos import note_blocked
+            note_blocked(m, command, why)
+        except Exception:
+            pass
         print(f"THANOS blocked: {why}. Do not look for a way around it: record it with ms-workspace thanos block \"<what and why>\", "
               "park that task ([!] in THANOS.md) and continue with another one.", file=sys.stderr)
         return 2
@@ -289,6 +294,11 @@ def _thanos_step(command: str, sid: str) -> int | None:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
                                                  "permissionDecisionReason": "THANOS: known-safe command inside the batch"}}))
         return 0
+    try:
+        from .thanos import note_asked
+        note_asked(m, command)   # left to the normal permissions: remembered so `thanos allow-suggest` can propose a rule
+    except Exception:
+        pass
     return None
 
 

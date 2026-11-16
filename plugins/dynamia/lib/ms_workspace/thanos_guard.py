@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 
 from .guard import SHELLS, _git_subcommand, _segments, _strip
 
@@ -18,12 +19,13 @@ NEVER = {"sudo", "su", "doas", "pkexec", "runuser"}
 REMOTE = {"ssh", "scp", "sftp", "rsync", "mosh", "nc", "ncat", "telnet", "ftp", "lftp", "kubectl", "helm", "terraform", "tofu", "ansible",
           "ansible-playbook", "ansible-vault", "aws", "gcloud", "gsutil", "az", "doctl", "flyctl", "fly", "heroku", "vercel", "netlify",
           "wrangler", "pulumi", "packer", "vagrant", "twine", "gh", "glab", "hub"}
-DESTROY = {"kill", "pkill", "killall", "chown", "chgrp", "mkfs", "fdisk", "parted", "shutdown", "reboot", "halt", "poweroff", "systemctl",
+DESTROY = {"chown", "chgrp", "mkfs", "fdisk", "parted", "shutdown", "reboot", "halt", "poweroff", "systemctl",
            "service", "crontab", "dd", "shred", "mount", "umount", "iptables", "ufw", "passwd", "useradd", "userdel", "visudo"}
 READONLY = {"ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "sort", "uniq", "diff", "cmp", "stat", "file", "echo", "printf",
             "pwd", "date", "which", "type", "true", "false", "test", "[", "basename", "dirname", "realpath", "readlink", "cut", "tr", "awk",
             "jq", "column", "tree", "du", "df", "uname", "whoami", "id", "hostname", "sleep", "seq", "expr", "md5sum", "sha1sum", "sha256sum",
             "nl", "rev", "od", "xxd", "hexdump", "printenv", "nproc", "free", "uptime", "ps", "lsof", "ss", "sed", "find", "wait", ":"}
+KILLERS = {"kill", "pkill", "killall"}
 WRITERS = {"mkdir", "touch", "cp", "mv", "ln", "tee", "chmod", "install", "truncate"}
 BUILD = {"mvn", "mvnw", "gradle", "gradlew"}
 NODEPM = {"pnpm", "npm", "yarn", "bun"}
@@ -72,24 +74,177 @@ def _operands(args: list[str]) -> list[str]:
     return out
 
 
-def _push(rest: list[str], m: dict, cwd: str) -> tuple[str, str]:
-    """Only a plain push of the mission's own batch branch to origin (an offsite backup of what piled up)."""
-    branch = m["branch"]
+# ------------------------------------------------------------------- processes
+# A mission starts dev servers, test runners and watchers inside its worktree, and has to be able to stop them. It may signal only a
+# process that is the user's own, is not part of this session, and works in the batch (its cwd or its command line is inside it).
+# Without /proc (not Linux) nothing can be proven: the verdict is "unknown" and the normal permissions decide.
+def _stat_ppid(pid: int) -> int:
+    try:
+        return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def _session_chain() -> set[int]:
+    chain, pid = set(), os.getpid()
+    while pid > 1 and pid not in chain:
+        chain.add(pid)
+        pid = _stat_ppid(pid)
+    return chain
+
+
+def _proc_text(pid: int) -> tuple[str, str, str]:
+    """(comm, command line, cwd) of a process; OSError when it vanished or cannot be read."""
+    base = Path(f"/proc/{pid}")
+    comm = (base / "comm").read_text().strip()
+    cmd = (base / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+    return comm, cmd, os.readlink(base / "cwd")
+
+
+def _mission_owns(pid: int, m: dict) -> bool | None:
+    """True: gone or started by the mission. False: somebody else's. None: cannot tell on this platform."""
+    if not Path("/proc/self").exists():
+        return None
+    if pid <= 1 or pid in _session_chain():
+        return False
+    base = Path(f"/proc/{pid}")
+    if not base.exists():
+        return True   # nothing to signal
+    try:
+        if base.stat().st_uid != os.getuid():
+            return False
+        _, cmd, cwd = _proc_text(pid)
+        if os.getpgid(pid) in {p.get("pgid") for p in (m.get("procs") or [])}:
+            return True   # started with `thanos run`: the mission's own record
+    except OSError:
+        return False
+    return inside(cwd, m, "/") or os.path.realpath(m["batch_path"]) in cmd
+
+
+def _own_job(token: str) -> bool:
+    """`$!` and `%1` name a background job of the command being run now, so the mission started it."""
+    return token == "$!" or bool(re.fullmatch(r"%\d+", token))
+
+
+def _kill_pids(args: list[str]) -> tuple[list[int], list[str], str]:
+    """(pids, job tokens, problem) of a `kill` command line."""
+    pids, jobs, after, skip = [], [], False, False
+    for a in args:
+        if skip:
+            skip = False
+        elif after or not a.startswith("-"):
+            if a.isdigit():
+                pids.append(int(a))
+            elif _own_job(a):
+                jobs.append(a)
+            else:
+                return [], [], f"kill {a}: not a plain process id"
+        elif a == "--":
+            after = True
+        elif a in ("-s", "-n", "-q"):
+            skip = True
+        elif a in ("-l", "-L") or a.startswith("--list") or a.startswith("--table"):
+            return [], [], ""
+        elif not re.fullmatch(r"-(\d+|[A-Za-z][A-Za-z0-9+-]*)", a):
+            return [], [], f"kill {a}: not a plain process id or signal"
+    return pids, jobs, ""
+
+
+def _name_matches(prog: str, args: list[str]) -> tuple[list[int], str]:
+    """Process ids a `pkill` or `killall` would signal, or a reason it is too broad to judge."""
+    full = exact = False
     pos = []
+    for a in args:
+        if a == "--":
+            continue
+        if a.startswith("-") and len(a) > 1:
+            flags = a[1:]
+            if prog == "pkill" and re.fullmatch(r"[fxi]+", flags):
+                full, exact = full or "f" in flags, exact or "x" in flags
+            elif re.fullmatch(r"(\d+|[A-Z][A-Z0-9+]*|SIG[A-Z0-9]+)", flags) or flags in ("e", "q", "v", "w") and prog == "killall":
+                pass
+            else:
+                return [], f"{prog} {a} selects processes by user, group or terminal"
+        else:
+            pos.append(a)
+    if len(pos) != 1:
+        return [], f"{prog} needs exactly one name or pattern"
+    try:
+        pattern = re.compile(pos[0])
+    except re.error:
+        return [], f"{prog}: invalid pattern"
+    me, chain, hits = os.getuid(), _session_chain(), []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) in chain:
+            continue
+        try:
+            if entry.stat().st_uid != me:
+                continue
+            comm, cmd, _ = _proc_text(int(entry.name))
+        except OSError:
+            continue
+        subject = cmd if full else comm
+        if prog == "killall":
+            ok = comm == pos[0]
+        else:
+            ok = bool(pattern.fullmatch(subject) if exact else pattern.search(subject))
+        if ok:
+            hits.append(int(entry.name))
+    return hits, ""
+
+
+def _kill(prog: str, args: list[str], m: dict) -> tuple[str, str]:
+    if prog == "kill":
+        pids, _, problem = _kill_pids(args)
+        if problem:
+            return "unknown", ""
+    else:
+        pids, problem = _name_matches(prog, args)
+        if problem:
+            return "block", f"{problem}: use 'kill <pid>' on a process of this batch"
+    for pid in pids:
+        own = _mission_owns(pid, m)
+        if own is None:
+            return "unknown", ""
+        if not own:
+            return "block", (f"{prog}: process {pid} was not started by this mission (it is not the user's, is part of this session, or does not work in the batch); "
+                             "THANOS stops only the processes it started")
+    return "safe", ""
+
+
+def own_ref(name: str, m: dict) -> bool:
+    """A branch the mission owns: its batch branch and every task branch agent/<batch>/*."""
+    n = name[len("refs/heads/"):] if name.startswith("refs/heads/") else name
+    return bool(n) and ".." not in n and (n == m["branch"] or n.startswith(f"agent/{os.path.basename(m['batch_path'])}/"))
+
+
+def _current(cwd: str) -> str:
+    from .core import git
+    r = git(cwd, "branch", "--show-current")
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+PUSH_FLAGS = {"-u", "--set-upstream", "-v", "--verbose", "-q", "--quiet", "--no-verify", "-f", "--force", "--force-if-includes", "-d", "--delete", "--atomic"}
+
+
+def _push(rest: list[str], m: dict, cwd: str) -> tuple[str, str]:
+    """Free pushes, deletes and forced updates of the mission's own branches on origin (the batch branch and agent/<batch>/*); nothing else."""
+    branch, delete, pos = m["branch"], any(a in ("-d", "--delete") for a in rest), []
     for a in rest:
         if a.startswith("-"):
-            if a not in ("-u", "--set-upstream", "-v", "--verbose", "-q", "--quiet", "--no-verify"):
+            if a not in PUSH_FLAGS and not a.startswith("--force-with-lease"):
                 return "block", f"git push option {a}"
         else:
             pos.append(a)
-    if len(pos) != 2 or pos[0] != "origin":
-        return "block", f"git push must name the remote and the branch: git push -u origin {branch}"
-    spec = pos[1]
-    if spec == "HEAD":
-        from .core import git_out
-        spec = git_out(cwd, "branch", "--show-current")
-    if spec not in (branch, f"refs/heads/{branch}", f"{branch}:{branch}", f"HEAD:{branch}"):
-        return "block", f"THANOS may only push its own batch branch ({branch}), never '{pos[1]}'"
+    if len(pos) < 2 or pos[0] != "origin":
+        return "block", f"git push must name the remote and the branches: git push -u origin {branch}"
+    for spec in pos[1:]:
+        names = [spec.lstrip("+")] if delete else [x for x in spec.lstrip("+").split(":", 1)]
+        for name in names:
+            if name == "HEAD":
+                name = _current(cwd)
+            if name and not own_ref(name, m):
+                return "block", f"THANOS may only push its own branches ({branch} and agent/{os.path.basename(m['batch_path'])}/*), never '{spec}'"
     return "safe", ""
 
 
@@ -104,21 +259,22 @@ def _git(args: list[str], m: dict, cwd: str) -> tuple[str, str]:
             return "block", "git --git-dir/--work-tree"
     sub, rest = _git_subcommand(args)
     flags = [a for a in rest if a.startswith("-")]
+    here = _current(cwd)
+    mine = bool(here) and own_ref(here, m) and inside(cwd, m, cwd)   # this worktree and its checked-out branch belong to the mission
     if sub == "push":
         return _push(rest, m, cwd)
     if sub in GIT_NEVER:
         return "block", f"git {sub}"
-    if sub == "reset" and any(a in ("--hard", "--merge", "--keep") for a in rest):
-        return "block", "git reset --hard discards work"
-    if sub == "clean" and any(a == "--force" or (a.startswith("-") and not a.startswith("--") and "f" in a) for a in rest):
-        return "block", "git clean -f deletes untracked files"
-    if sub == "checkout" and ("--" in rest or "." in rest or any(a in ("-f", "--force") for a in rest)):
-        return "block", "git checkout would discard changes"
+    if sub == "reset" and any(a in ("--hard", "--merge", "--keep") for a in rest) and not mine:
+        return "block", "git reset --hard is allowed only in the mission's worktree, on one of its own branches"
+    if sub == "clean" and any(a == "--force" or (a.startswith("-") and not a.startswith("--") and "f" in a) for a in rest) and not mine:
+        return "block", "git clean -f is allowed only in the mission's worktree, on one of its own branches"
+    if sub == "checkout" and ("--" in rest or "." in rest or any(a in ("-f", "--force") for a in rest)) and not mine:
+        return "block", "git checkout would discard changes outside the mission's own branches"
     if sub == "branch" and any(a in ("-D", "-d", "--delete", "-m", "-M", "--move", "-f", "--force") for a in rest):
-        mine = f"agent/{os.path.basename(m['batch_path'])}/"
         names = [a for a in rest if not a.startswith("-")]
-        if any(a in ("-m", "-M", "--move", "-f", "--force") for a in rest) or not names or not all(n.startswith(mine) for n in names):
-            return "block", "git branch -D/-m of a branch that is not one of this mission's task branches"
+        if not names or not all(own_ref(n, m) for n in names):
+            return "block", "git branch -D/-m/-f of a branch that is not one of this mission's own (the batch branch and agent/<batch>/*)"
         return "safe", ""
     if sub == "stash" and rest[:1] in (["drop"], ["clear"]):
         return "block", "git stash drop/clear"
@@ -135,14 +291,22 @@ def _git(args: list[str], m: dict, cwd: str) -> tuple[str, str]:
     return "unknown", ""
 
 
-def _ms(words: list[str], args: list[str]) -> tuple[str, str]:
+def _ms(words: list[str], args: list[str], m: dict | None = None) -> tuple[str, str]:
     sub = words[0] if words else ""
     if sub in MS_BLOCK:
         return "block", f"ms-workspace {sub} is for the user, not for a THANOS mission"
     if sub == "env" and "--trust" in args:
         return "block", "ms-workspace env --trust"
     if sub == "ps" and words[1:2] == ["kill"]:
-        return "block", "ms-workspace ps kill"
+        pids = [int(a) for a in args if a.isdigit()]
+        if m is None or not pids:
+            return "block", "ms-workspace ps kill"
+        owned = [_mission_owns(p, m) for p in pids]
+        if None in owned:
+            return "unknown", ""
+        if not all(owned):
+            return "block", "ms-workspace ps kill: a process was not started by this mission (THANOS stops only the processes it started)"
+        return "safe", ""
     if sub == "docker" and words[1:2] == ["clean"]:
         return "block", "ms-workspace docker clean"
     if sub == "dev-env" and words[1:2] in (["add"], ["rm"]):
@@ -201,6 +365,9 @@ def _classify(seg: list[str], m: dict, cwd: str, moved: bool, deny: list[str]) -
     web = any(a.startswith("--web") or (a.startswith("-") and not a.startswith("--") and "w" in a[1:]) for a in args)   # --web, --web=true, -w, -cw
     if prog == "gh" and len(words) >= 2 and words[1] in GH_READ.get(words[0], ()) and not web:
         return "safe", "", cwd, moved   # read-only lookups (issue text, PR state, CI checks) do not publish anything
+    if prog in KILLERS:
+        k, why = _kill(prog, args, m)
+        return k, why, cwd, moved
     if prog in REMOTE:
         return "block", f"{prog} reaches machines or services outside the batch", cwd, moved
     if prog in DESTROY:
@@ -228,7 +395,7 @@ def _classify(seg: list[str], m: dict, cwd: str, moved: bool, deny: list[str]) -
         k, why = _git(args, m, cwd)
         return k, why, cwd, moved
     if prog == "ms-workspace":
-        k, why = _ms(words, args)
+        k, why = _ms(words, args, m)
         return k, why, cwd, moved
     if prog in BUILD:
         if any(re.search(r"(^|:)deploy$|release:|publish|uploadArchives|scm:|-Dmaven\.deploy|versions:commit", a, re.I) for a in args):

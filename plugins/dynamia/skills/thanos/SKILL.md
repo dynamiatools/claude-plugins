@@ -1,7 +1,7 @@
 ---
 name: thanos
 description: Runs a complex goal from start to finish with minimal interruptions, inside its own batch worktree, with a branch per task, a step cap, a strict guard and at most three Opus reviews. Use only when the user explicitly asks for THANOS, an autonomous mission, or to "do it all yourself".
-argument-hint: "<goal> [--max-steps N]"
+argument-hint: "<goal> [--max-steps N] | extend <batch> <goal>"
 allowed-tools: Bash(ms-workspace thanos:*) Bash(ms-workspace usage:*) Bash(ms-workspace batch new:*) Bash(ms-workspace status:*) Bash(ms-workspace test:*) Bash(ms-workspace integrate:*)
 ---
 
@@ -10,13 +10,16 @@ allowed-tools: Bash(ms-workspace thanos:*) Bash(ms-workspace usage:*) Bash(ms-wo
 > **Fine. I'll do it myself.**
 > THANOS activated. Mission accepted.
 
-Print those two lines when you start. The user defines the goal; you get it done. The rules that make it safe are enforced by hooks, not by good will: do not try to get around them.
+Print those two lines when you start (prefix the second with 🟣). The user defines the goal; you get it done. The rules that make it safe are enforced by hooks, not by good will: do not try to get around them.
 
 ## What is different from the normal flow
 - It always works in a **worktree of its own** (`batch new`), never in the user's checkout. No question about worktree or plain branch.
 - **One question round, at the start, and none after.** Afterwards decide with sensible defaults and write each decision under `## Decisions` in `THANOS.md`.
 - **No parallel agents.** The only agent you may launch is the Opus reviewer `dynamia:boss`, in the foreground, **at most 3 times**: (1) before the first line is written, (2) at the end of the mission, (3) one rescue when something blows up (a milestone `test t1` that cannot be fixed after two different attempts, or a merge that breaks the batch). Ask it for a report of at most 25 lines. Search with Grep and Glob yourself.
 - The strict guard **blocks**, it does not ask: pushes (except the batch branch), `ship`, `merge`, `clean`, deploys, remote hosts, production, destructive git or shell, edits outside the batch. Read-only `gh` lookups (`gh issue view|list`, `gh pr view|list|checks`, `gh run list`) are allowed, so read the issue text instead of guessing it; any `gh` that writes is blocked. A blocked action is not a failure of the mission: record it, park the task, go on.
+- It is free on its own branches (the batch branch and `agent/<batch>/*`): push, force-push, delete and rename them, locally and on origin, so push a task branch as a backup whenever it helps. Any other branch is blocked.
+- Start dev servers and watchers with `ms-workspace thanos run --name web -- pnpm dev`; they are the mission's own and `ms-workspace thanos kill web` (or `kill <pid>`) stops them, and `pause`, `done` and `stop` clean them up. Plain `kill`/`pkill` work only on processes that work inside the batch; never kill one you did not start.
+- A side panel with the task list (`/dynamia-thanos-panel`) opens by itself at `thanos start` and follows `THANOS.md`: keep the task lines current.
 - It never ships and never opens a PR. Integrating and publishing stay with the user.
 
 ## Steps
@@ -33,14 +36,18 @@ Print those two lines when you start. The user defines the goal; you get it done
    3. `ms-workspace test t0`; fix failures. If an approach fails, write it under `## Failed attempts` and never repeat it.
    4. `ms-workspace thanos task done <name>` (merges it `--no-ff` into the batch branch, ticks the line in `THANOS.md`, and pushes the batch branch to origin every few tasks as a backup).
    5. After a milestone (a group of related tasks) run `ms-workspace test t1 <batch>`.
+   - After the user allows what blocked a parked task: `ms-workspace thanos unblock <task>`. To see which prompted commands deserve a permanent rule: `ms-workspace thanos allow-suggest`.
    - Blocked by a guard or a missing permission: `ms-workspace thanos block --task <name> "<what and why>"` (it records the blocker and parks the task `[!]` in the ledger), then go to the next. Never retry the same command in a disguised form.
    - Waiting for the Opus reviewer (it runs in the background of the harness): run `ms-workspace thanos wait [MINUTES]` first and then end your turn. While the window is open the Stop hook lets you stop without counting steps; the reviewer's notification wakes you up. Do not poll.
    - A conflict on `task done` leaves you on the task branch: rebase it on the batch branch, fix, run `task done` again.
 7. **Finish**: when no `[ ]` task is left, run `ms-workspace test t1 <batch>`, check every success criterion with evidence (the command and its result), then **Opus review 2/3** over the whole batch against the original goal. Fix what is real, then `ms-workspace thanos done`.
-8. **Report** in the user's language, short: the goal and whether each criterion passed (with the command), the commits and files changed (`git diff --stat` against the base), the steps and Opus reviews used, the parked tasks and blockers, and what is left. Say what was not verified. Tell them the next step is theirs: `ms-workspace plan <batch>` and `/dynamia:ship`.
+8. **Report** in the user's language, short, with the status marks of the global instructions (🟢 criterion passed with its command, 🔴 failed or blocked, 🟡 not verified or risk left, 🟣 decisions and mission steps) so it reads the same in the terminal and in the chat: the goal and whether each criterion passed (with the command), the commits and files changed (`git diff --stat` against the base), the steps and Opus reviews used, the parked tasks and blockers, and what is left. Say what was not verified. `thanos done` also writes `THANOS-REPORT.md`; point to it. Tell them the next step is theirs: `ms-workspace plan <batch>` and `/dynamia:ship`.
+
+## Extending a finished mission
+When the user wants more work on top of a mission that is `done`: run `ms-workspace thanos extend <batch> --check` (add `--skip-tests` only if the user says so) and show the result. Only when it passes, `ms-workspace thanos extend <batch> --goal "<what to add>" --opus-used 0` after the same brief and plan steps (new tasks in the fresh `THANOS.md`, Opus review 1/3 of the new plan). The previous mission's history is in `THANOS.g<N>.md`; read it, do not redo what it lists as done, and never repeat its Failed attempts. If the check fails, tell the user what is wrong; do not extend a mission that is paused or has open tasks (use `resume`).
 
 ## When the mission pauses
-It pauses by itself at the step cap, at critical plan usage, or after three steps without progress, and writes a handoff. Say so in one line with the reason. To continue: `ms-workspace thanos resume <batch>` (raise the cap first with a new `thanos start` only if the user wants more steps). `ms-workspace thanos stop` cancels the mission and keeps the batch.
+It pauses by itself at the step cap, at critical plan usage, or after three steps without progress, and writes a handoff. Say so in one line with the reason, starting with 🟡. To continue: `ms-workspace thanos resume <batch>` (raise the cap first with a new `thanos start` only if the user wants more steps). `ms-workspace thanos stop` cancels the mission and keeps the batch.
 
 ## Notes
 - Status at any time: `ms-workspace thanos status`. The ledger `THANOS.md` is the memory that survives compaction: keep Decisions, Failed attempts and Blockers current.
