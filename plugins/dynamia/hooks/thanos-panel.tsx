@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, On, Timer } from 'claude-code'
 
 import type { ThanosView } from './thanos-view'
-import { bar, clip, counts, glyph, killArgv, panelArgv, parsePanel, splitTask, statusLine, wrap } from './thanos-view'
+import { bar, bullet, clip, counts, glyph, killArgv, panelArgv, parsePanel, splitTask, statusLine, wrap } from './thanos-view'
 
 const PANE = 'dynamia-thanos'
 const EVERY_MS = 3000
@@ -114,7 +114,7 @@ export function registerThanos(on: On) {
             {`THANOS · ${v.mission.batch}`}
           </Text>
           <Text dimColor>{clip(statusLine(v.mission), width)}</Text>
-          <Text dimColor>{clip(v.mission.goal, width)}</Text>
+          <Text dimColor>{wrap(v.mission.goal, width).join('\n')}</Text>
           {v.usage !== null && (
             <Text color={v.usage >= 90 ? 'red' : v.usage >= 70 ? 'yellow' : undefined} dimColor={v.usage < 70}>
               {`plan usage ${Math.round(v.usage)}%${v.mission.until_usage ? ` (stops at ${v.mission.until_usage}%)` : ''}`}
@@ -164,8 +164,8 @@ export function registerThanos(on: On) {
             <Text bold color="red">
               Last blocked
             </Text>
-            <Text dimColor>{clip(v.last_block.c, width)}</Text>
-            <Text dimColor>{clip(v.last_block.why, width)}</Text>
+            <Text dimColor>{wrap(v.last_block.c, width).join('\n')}</Text>
+            <Text dimColor>{wrap(v.last_block.why, width).join('\n')}</Text>
           </Box>
         )}
         {v.blockers.length > 0 && (
@@ -175,7 +175,7 @@ export function registerThanos(on: On) {
             </Text>
             {v.blockers.slice(-3).map((b, i) => (
               <Text key={String(i)} dimColor>
-                {clip(b, width)}
+                {bullet(b, width)}
               </Text>
             ))}
           </Box>
@@ -185,7 +185,7 @@ export function registerThanos(on: On) {
             <Text bold>{`Decisions (${v.decisions.length})`}</Text>
             {v.decisions.slice(-2).map((d, i) => (
               <Text key={String(i)} dimColor>
-                {clip(d, width)}
+                {bullet(d, width)}
               </Text>
             ))}
           </Box>

@@ -90,6 +90,11 @@ export function wrap(text: string, width: number): string[] {
   return lines
 }
 
+// A wrapped list item: bullet on the first line, hanging indent after it.
+export function bullet(text: string, width: number): string {
+  return wrap(text, width - 2).map((l, i) => (i === 0 ? '• ' : '  ') + l).join('\n')
+}
+
 export function bar(done: number, total: number, width: number): string {
   const cells = Math.max(1, width)
   const filled = total <= 0 ? 0 : Math.round((done / total) * cells)
