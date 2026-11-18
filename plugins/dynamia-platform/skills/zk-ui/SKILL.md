@@ -47,6 +47,9 @@ public class StandardViewModel {
 - User messages: `UIMessages.showMessage("text", MessageType.WARNING)`, `showQuestion(text, onYes)`, `showMessageDialog`. Throw `ValidationError` for rule violations.
 - Pages are registered in a `ModuleProvider` with `new Page(id, name, "classpath:/pages/x.zul")`.
 
+## Temporary pages and parameters
+A `Page` made in code with `setTemporal(true)` (view/edit one record) is opened with `ZKNavigationManager.getInstance().setCurrentPage(page)` and receives its data as page attributes (`page.addAttribute("bookId", id)`), read back with `Page.getCurrent().getAttribute(...)`. **Store simple values (ids, strings, numbers) in attributes, not entities**: they are serialized to JSON when a Vue shell shows the page, and a large or lazy entity bloats or breaks it; load the entity by id where you use it. Full pattern, helper class, Vue-shell behavior and checklist: `references/temporary-pages.md`.
+
 ## CrudController
 Extend `CrudController<T>` for hooks `beforeCreate`, `afterCreate`, `beforeEdit`, `beforeDelete`, `beforeQuery`; `getEntity()` returns the current entity. Link it from the descriptor: `view: crud`, `beanClass: ...`, `controller: com.acme.BookCrudController`. Throw `ValidationError` to stop an operation.
 
