@@ -53,6 +53,12 @@ Composables: `useViewer`, `useView`, `useForm`, `useTable`, `useCrud`, `useEntit
 
 If the project already has a convention for this, follow it; if it is unclear which side a new screen belongs to, ask.
 
+## Opening a screen with parameters
+Pages opened from a record ("view this order") are temporary ZK pages carrying parameters as attributes (`dynamia-platform:zk-ui`, `references/temporary-pages.md`). In a Vue shell the server parks the page and the shell opens a new tab on `temporal/<token>`: Vue does not receive those attributes as props, the ZK page reads them. Rules for parameters that cross to Vue:
+- Pass **simple values** (id, string, number, boolean). Do not send whole entities: serializing a large entity to JSON is slow, leaks internal fields and fails on lazy collections.
+- A Vue screen that needs the record gets the **id** (route param, query string or prop) and loads it with `client.crud(path).findById(id)` or its own API, not from a page attribute.
+- Do not depend on a temporary path outside the session that made it, and do not build links to it by hand.
+
 ## More
 Action flows (`runActionFlow`, steps, headless actions, the handlers for preview, clipboard, `openPage`, `refresh`, `pickEntity`), list queries with `client.crud(path).find(QuerySpec)`, toolbar controls, field components (`FieldComponentRegistry`), table cells, dates and the theme package: `references/action-flows-and-fields.md`. Read it when a button must run a server action with questions, when a field needs a custom component, or when a date shows the wrong day.
 
