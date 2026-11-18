@@ -10,8 +10,8 @@ Read-only. `mysql-tool query` runs **one** `SELECT`, `SHOW`, `DESCRIBE` or `EXPL
 ```
 python3 ${CLAUDE_PLUGIN_ROOT}/bin/mysql-tool query <profile> "SELECT ..." [--db SCHEMA] [--limit N] [--timeout S] [--json]
 ```
-- `<profile>`: a server profile (`mysql-tool profiles`; add one with `/dynamia-mysql:connect`). If none exists, go there first. Never ask for or print a password.
-- `--db`: default schema, so `FROM orders` works. Without it, qualify tables (`shop.orders`).
+- `<profile>`: a saved connection (`mysql-tool conn-list`; create one with `/dynamia-mysql:connect`, which saves it to the workspace `.dynamia/mysql/connections.json` or to the user folder). If none exists, go there first. Never ask for or print a password.
+- `--db`: default schema, so `FROM orders` works; a connection saved with `--db` uses it automatically. Without either, qualify tables (`shop.orders`).
 - `--limit` (default 200, `0` = no cap): rows returned. When the result is cut, a `-- truncated` note appears on stderr; narrow the query instead of raising the cap.
 - `--timeout` (default 30 s): the server stops the statement after this time.
 - `--json`: a list of row objects, better when you will process the result.

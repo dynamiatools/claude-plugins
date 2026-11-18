@@ -23,7 +23,7 @@ RELEVANT = re.compile(r"(?<![\w-])(mysql\w*|mariadb\w*|mariabackup|xtrabackup|pe
                       r"|/var/lib/(mysql|mariadb)|dynamia-mysql|mysql-tool", I)
 EXEMPT_FIRST = {"git", "grep", "rg", "ls", "head", "tail", "man", "which", "type", "cd", "pwd", "diff", "wc"}
 SAFE_SUBS = r"(?:query|inspect|info|replica-status|plan-replica|diagnose|plan-failover|audit-config|audit-accounts|slow-queries|locks|" \
-            r"schema-diff|upgrade-check|monitor|scan-secrets|profiles|secrets|verify-backup|secret-set|secret-gen)"
+            r"schema-diff|upgrade-check|monitor|scan-secrets|profiles|secrets|conn-list|verify-backup|secret-set|secret-gen)"
 SAFE_TOOL = re.compile(r"^\s*(?:python3?\s+)?(?:\S*/)?mysql-tool\s+" + SAFE_SUBS + r"\b")
 SPLIT = re.compile(r"&&|\|\||[;\n|]")
 REDIRECT = re.compile(r"[<>`]|\$\(")
@@ -125,7 +125,7 @@ def unfiltered_dml(cmd):
 
 
 def check_file(path):
-    if path and SECRET_DIR.search(path) and not path.endswith("profiles.toml"):
+    if path and SECRET_DIR.search(path) and not path.endswith(("profiles.toml", "connections.json")):
         return "deny", ["reading this plugin's secrets or temporary files (the profiles file is fine to read)"]
     if path and CRED_FILES.search(path):
         return "deny", ["reading a MySQL credentials file (ask the user to check it)"]
