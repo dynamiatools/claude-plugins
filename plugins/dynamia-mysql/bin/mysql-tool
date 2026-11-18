@@ -29,6 +29,7 @@ Destructive statements are never run by this tool, except through exec-test on a
 """
 import argparse
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -89,10 +90,10 @@ def store_secret(name, value, force=False):
         fh.write("".join("%s=%s\n" % kv for kv in sorted(cur.items())))
 
 
-def load_profiles():
+def read_toml_profiles():
     p = os.path.join(HOME(), "profiles.toml")
     if not os.path.exists(p):
-        raise Fail("no profiles: create %s (see the connect skill)" % p)
+        return None
     with open(p, "rb") as fh:
         profiles = tomllib.load(fh).get("profiles", {})
     for name, prof in profiles.items():
@@ -106,9 +107,153 @@ def load_profiles():
     return profiles
 
 
+# ---- saved connections (connections.json) ---------------------------------------------------
+# Two places: the user's folder (HOME()/connections.json) and the workspace (.dynamia/mysql/connections.json, found by walking
+# up from the current directory). They hold the connection, never a password: `secret` names an entry of secrets.env.
+# Precedence for a name: profiles.toml, then the workspace, then the user's file. `env` and `confirm` are not accepted here:
+# only profiles.toml can mark a server as a test server, so a shared file can never loosen the destructive-SQL guard.
+# A workspace file travels with the repo, so each of its connections must be trusted once on this machine (conn-trust):
+# otherwise a cloned repo could point a connection at another host and receive a secret of the user's.
+
+CONN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
+CONN_STR = {"host": r"[A-Za-z0-9._:-]{1,253}", "user": r"[\w.@-]{1,64}", "secret": r"[A-Z][A-Z0-9_]*", "login_path": r"[\w.-]{1,64}",
+            "socket": r"/[\w./-]{1,200}", "client": r"[\w./-]{1,200}", "db": r"[A-Za-z0-9_$]{1,64}", "description": r"[^\x00-\x1f]{0,200}",
+            "ssl_mode": r"(?i)DISABLED|PREFERRED|REQUIRED|VERIFY_CA|VERIFY_IDENTITY"}
+CONN_KEYS = set(CONN_STR) | {"port"}
+CONN_SECURITY = ("host", "port", "user", "secret", "login_path", "socket", "client")  # what decides where a secret goes
+
+
+def check_connection(name, c):
+    if not CONN_NAME.match(name):
+        raise Fail("connection name %r: use letters, digits, '.', '_' or '-' (max 40)" % name)
+    if not isinstance(c, dict):
+        raise Fail("connection %s must be an object" % name)
+    for k in c:
+        if "pass" in k.lower() or "pwd" in k.lower():
+            raise Fail("connection %s has %s: passwords never go in a connection; use \"secret\": \"NAME\"" % (name, k))
+        if k in ("env", "confirm"):
+            raise Fail("connection %s: %s is only honored in profiles.toml (the user marks test servers there)" % (name, k))
+        if k not in CONN_KEYS:
+            raise Fail("connection %s: unknown key %s (allowed: %s)" % (name, k, ", ".join(sorted(CONN_KEYS))))
+    for k, rx in CONN_STR.items():
+        if k in c and not (isinstance(c[k], str) and re.fullmatch(rx, c[k])):
+            raise Fail("connection %s: invalid %s" % (name, k))
+    if "port" in c and not (isinstance(c["port"], int) and not isinstance(c["port"], bool) and 0 < c["port"] < 65536):
+        raise Fail("connection %s: invalid port" % name)
+    if not c.get("user"):
+        raise Fail("connection %s needs a user" % name)
+    if not (c.get("host") or c.get("socket") or c.get("login_path")):
+        raise Fail("connection %s needs a host, a socket or a login_path" % name)
+    return c
+
+
+def workspace_dir(start=None):
+    """The nearest .dynamia folder at or above start (default: the current directory), as its mysql/ subfolder."""
+    d = os.path.abspath(start or os.getcwd())
+    while True:
+        if os.path.isdir(os.path.join(d, ".dynamia")):
+            return os.path.join(d, ".dynamia", "mysql")
+        if os.path.dirname(d) == d:
+            return None
+        d = os.path.dirname(d)
+
+
+def conn_path(scope, create=False):
+    if scope == "user":
+        return os.path.join(HOME(), "connections.json")
+    ws = workspace_dir()
+    if ws is None:
+        if create:
+            raise Fail("no .dynamia folder at or above %s: use --scope user, or create the workspace first" % os.getcwd())
+        return None
+    return os.path.join(ws, "connections.json")
+
+
+def read_connections(path):
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except ValueError as e:
+        raise Fail("%s is not valid JSON: %s" % (path, e))
+    conns = data.get("connections") if isinstance(data, dict) else None
+    if not isinstance(conns, dict):
+        raise Fail("%s must look like {\"connections\": {\"name\": {...}}}" % path)
+    return {n: check_connection(n, c) for n, c in conns.items()}
+
+
+def write_connections(path, conns, private):
+    os.makedirs(os.path.dirname(path), mode=0o700 if private else 0o755, exist_ok=True)
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if private else 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"connections": {n: conns[n] for n in sorted(conns)}}, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def fingerprint(c):
+    return hashlib.sha256(json.dumps({k: c.get(k) for k in CONN_SECURITY}, sort_keys=True).encode()).hexdigest()
+
+
+def trusted_path():
+    return os.path.join(HOME(), "trusted-connections.json")
+
+
+def load_trusted():
+    try:
+        with open(trusted_path(), encoding="utf-8") as fh:
+            return set(json.load(fh).get("fingerprints", []))
+    except (OSError, ValueError, AttributeError):
+        return set()
+
+
+def trust(c):
+    cur = load_trusted()
+    cur.add(fingerprint(c))
+    os.makedirs(HOME(), mode=0o700, exist_ok=True)
+    fd = os.open(trusted_path(), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"fingerprints": sorted(cur)}, fh)
+
+
+def scan_profiles():
+    """Every known connection: [(name, scope, entry, usable)]. scope: profiles.toml, workspace or user. Shadowed names are dropped."""
+    out, seen = [], set()
+    toml = read_toml_profiles() or {}
+    for n, c in toml.items():
+        out.append((n, "profiles.toml", c, True)); seen.add(n)
+    trusted = None
+    for scope in ("workspace", "user"):
+        for n, c in read_connections(conn_path(scope)).items():
+            if n in seen:
+                continue
+            seen.add(n)
+            if scope == "workspace":
+                trusted = load_trusted() if trusted is None else trusted
+                out.append((n, scope, c, fingerprint(c) in trusted))
+            else:
+                out.append((n, scope, c, True))
+    return out
+
+
+def load_profiles():
+    found = scan_profiles()
+    profiles = {n: c for n, _, c, ok in found if ok}
+    if not found:
+        raise Fail("no profiles or connections: add one with conn-add, or create %s (see the connect skill)" % os.path.join(HOME(), "profiles.toml"))
+    return profiles
+
+
 def get_profile(name):
     profiles = load_profiles()
     if name not in profiles:
+        for n, scope, c, ok in scan_profiles():
+            if n == name and not ok:
+                raise Fail("connection %r comes from the workspace file and is not trusted on this machine yet: review it with conn-list "
+                           "(host %s, user %s, secret %s) and, if it is right, the user runs: ! mysql-tool conn-trust %s"
+                           % (name, c.get("host", c.get("socket", "-")), c.get("user"), c.get("secret", "-"), name))
         raise Fail("unknown profile %r; known: %s" % (name, ", ".join(sorted(profiles)) or "none"))
     return profiles[name]
 
@@ -190,7 +335,7 @@ def write_cnf(pw):
     return path
 
 
-def client_args(prof, readonly):
+def client_args(prof, readonly, database=None):
     """Returns (argv, option file to delete or None, password or None). The password is never in argv."""
     binary = client_binary(prof)
     pw = None
@@ -209,6 +354,8 @@ def client_args(prof, readonly):
              "--user=%s" % prof["user"]]
     if prof.get("socket"):
         args += ["--socket=%s" % prof["socket"]]
+    if database:
+        args += ["--database=%s" % database]
     mode = str(prof.get("ssl_mode", "")).upper()
     if mode:
         if client_is_mariadb(binary):
@@ -220,13 +367,14 @@ def client_args(prof, readonly):
     return args, cnf, pw
 
 
-def run_sql(prof, sql, readonly=True, timeout=60):
-    """Runs sql through the client over stdin. Returns stdout. Raises Fail with a redacted message."""
-    args, cnf, pw = client_args(prof, readonly)
+def run_sql(prof, sql, readonly=True, timeout=60, database=None, prelude=""):
+    """Runs sql through the client over stdin. Returns stdout. Raises Fail with a redacted message.
+    prelude is trusted session setup (SET SESSION ...) built by this tool, sent before the checked statement."""
+    args, cnf, pw = client_args(prof, readonly, database)
     extra = [pw] if pw else []
     try:
         try:
-            r = subprocess.run(args, input=fill_placeholders(sql), capture_output=True, text=True, timeout=timeout)
+            r = subprocess.run(args, input=prelude + fill_placeholders(sql), capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             raise Fail("timeout after %ss; the statement may still be running on the server" % timeout)
         if r.returncode:
@@ -271,6 +419,28 @@ def rows(out):
         return []
     head = lines[0].split("\t")
     return [dict(zip(head, l.split("\t"))) for l in lines[1:]]
+
+
+DB_NAME = re.compile(r"^[A-Za-z0-9_$]{1,64}$")
+DEFAULT_LIMIT, DEFAULT_QUERY_TIMEOUT = 200, 30
+
+
+def run_query(prof, sql, database=None, limit=DEFAULT_LIMIT, timeout=DEFAULT_QUERY_TIMEOUT):
+    """One read-only statement with a row cap and a server-side time limit. Returns (rows, truncated).
+    limit 0 means no cap; the time limit always applies."""
+    stmt = check_readonly(sql)
+    if database is not None and not DB_NAME.match(database):
+        raise Fail("--db must be a plain schema name (letters, digits, _ and $)")
+    if limit < 0 or timeout < 1:
+        raise Fail("--limit must be >= 0 and --timeout >= 1")
+    mariadb = client_is_mariadb(client_binary(prof))
+    pre = ["SET SESSION max_statement_time=%d" % timeout if mariadb else "SET SESSION MAX_EXECUTION_TIME=%d" % (timeout * 1000)]
+    if limit:
+        pre.append("SET SESSION sql_select_limit=%d" % (limit + 1))  # one extra row tells us the result was cut
+    out = rows(run_sql(prof, stmt, timeout=timeout + 5, database=database, prelude=";\n".join(pre) + ";\n"))
+    if limit and len(out) > limit:
+        return out[:limit], True
+    return out, False
 
 
 def q(prof, sql):
@@ -1331,6 +1501,19 @@ def main(argv=None):
     for n in ("info", "inspect", "replica-status"):
         p = sub.add_parser(n); p.add_argument("profile"); p.add_argument("--json", action="store_true"); p.add_argument("--max-lag", type=int, default=30)
     p = sub.add_parser("query"); p.add_argument("profile"); p.add_argument("sql"); p.add_argument("--json", action="store_true")
+    p.add_argument("--db", help="default schema for unqualified table names")
+    p.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="max rows returned (default %d, 0 = no cap)" % DEFAULT_LIMIT)
+    p.add_argument("--timeout", type=int, default=DEFAULT_QUERY_TIMEOUT, help="seconds before the server stops the statement (default %d)" % DEFAULT_QUERY_TIMEOUT)
+    p = sub.add_parser("conn-list")
+    p = sub.add_parser("conn-add"); p.add_argument("name")
+    p.add_argument("--host"); p.add_argument("--port", type=int); p.add_argument("--user", required=True)
+    p.add_argument("--secret", help="NAME of the password in secrets.env (set it with: ! mysql-tool secret-set NAME)")
+    p.add_argument("--login-path", dest="login_path"); p.add_argument("--socket"); p.add_argument("--ssl-mode", dest="ssl_mode")
+    p.add_argument("--client"); p.add_argument("--db", help="default schema for query"); p.add_argument("--description")
+    p.add_argument("--scope", choices=("auto", "user", "workspace"), default="auto", help="auto: the workspace if there is one, else the user folder")
+    p.add_argument("--force", action="store_true", help="replace a connection with the same name in that scope")
+    p = sub.add_parser("conn-remove"); p.add_argument("name"); p.add_argument("--scope", choices=("user", "workspace"))
+    p = sub.add_parser("conn-trust"); p.add_argument("name")
     p = sub.add_parser("exec"); p.add_argument("profile"); p.add_argument("sql")
     p = sub.add_parser("exec-test"); p.add_argument("profile"); p.add_argument("sql")
     p = sub.add_parser("plan-replica"); p.add_argument("--source", required=True); p.add_argument("--replica", required=True)
@@ -1378,8 +1561,48 @@ def main(argv=None):
             r = {k: v for k, v in r.items() if not k.startswith("_")}
             print(json.dumps(r, indent=2) if a.json else "%s\n%s" % (r["verdict"], "\n".join("- " + x for x in r["problems"])))
             return 0 if r["verdict"] in ("OK", "NONE") else 1
+        elif a.cmd == "conn-list":
+            for n, scope, c, ok in sorted(scan_profiles()):
+                print("%s\t%s\t%s@%s:%s\tdb=%s\tsecret=%s%s" % (n, scope, c.get("user"), c.get("host", c.get("socket", "-")), c.get("port", 3306),
+                      c.get("db", "-"), c.get("secret") or c.get("login_path") or "-", "" if ok else "\tNOT TRUSTED (conn-trust %s)" % n))
+        elif a.cmd == "conn-add":
+            scope = a.scope if a.scope != "auto" else ("workspace" if workspace_dir() else "user")
+            path = conn_path(scope, create=True)
+            conns = read_connections(path)
+            if a.name in conns and not a.force:
+                raise Fail("%s already exists in %s (use --force to replace it)" % (a.name, path))
+            entry = {k: v for k, v in dict(host=a.host, port=a.port, user=a.user, secret=a.secret, login_path=a.login_path, socket=a.socket,
+                                          ssl_mode=a.ssl_mode, client=a.client, db=a.db, description=a.description).items() if v is not None}
+            conns[a.name] = check_connection(a.name, entry)
+            write_connections(path, conns, private=(scope == "user"))
+            if scope == "workspace":
+                trust(entry)
+            print("saved %s in %s (%s)" % (a.name, path, scope))
+            if a.secret and a.secret not in load_secrets():
+                print("secret %s is not set yet: the user runs ! mysql-tool secret-set %s" % (a.secret, a.secret))
+        elif a.cmd == "conn-remove":
+            where = [sc for sc in ((a.scope,) if a.scope else ("workspace", "user")) if a.name in read_connections(conn_path(sc))]
+            if not where:
+                raise Fail("no connection %r in the saved connections%s" % (a.name, " of that scope" if a.scope else ""))
+            if len(where) > 1:
+                raise Fail("%r exists in both the workspace and the user folder: pass --scope" % a.name)
+            path = conn_path(where[0])
+            conns = read_connections(path)
+            del conns[a.name]
+            write_connections(path, conns, private=(where[0] == "user"))
+            print("removed %s from %s" % (a.name, path))
+        elif a.cmd == "conn-trust":
+            hit = [c for n, sc, c, ok in scan_profiles() if n == a.name and sc == "workspace"]
+            if not hit:
+                raise Fail("no workspace connection named %r" % a.name)
+            trust(hit[0])
+            print("trusted %s: host %s, user %s, secret %s" % (a.name, hit[0].get("host", hit[0].get("socket", "-")), hit[0].get("user"), hit[0].get("secret", "-")))
         elif a.cmd == "query":
-            emit_rows(rows(run_sql(get_profile(a.profile), check_readonly(a.sql))), a.json)
+            prof = get_profile(a.profile)
+            rs, cut = run_query(prof, a.sql, a.db or prof.get("db"), a.limit, a.timeout)
+            emit_rows(rs, a.json)
+            if cut:
+                print("-- truncated at %d rows; add a WHERE or a smaller LIMIT, or raise --limit (0 = no cap)" % a.limit, file=sys.stderr)
         elif a.cmd == "exec":
             prof = get_profile(a.profile)
             for s in check_write(a.sql):

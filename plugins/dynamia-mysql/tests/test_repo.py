@@ -10,7 +10,7 @@ SKILLS = os.path.join(ROOT, "skills")
 class RepoTest(unittest.TestCase):
     def test_skill_front_matter(self):
         names = sorted(os.listdir(SKILLS))
-        self.assertEqual(len(names), 13)
+        self.assertEqual(len(names), 14)
         for name in names:
             with open(os.path.join(SKILLS, name, "SKILL.md"), encoding="utf-8") as fh:
                 text = fh.read()
