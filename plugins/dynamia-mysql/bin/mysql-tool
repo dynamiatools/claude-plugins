@@ -190,7 +190,7 @@ def write_cnf(pw):
     return path
 
 
-def client_args(prof, readonly):
+def client_args(prof, readonly, database=None):
     """Returns (argv, option file to delete or None, password or None). The password is never in argv."""
     binary = client_binary(prof)
     pw = None
@@ -209,6 +209,8 @@ def client_args(prof, readonly):
              "--user=%s" % prof["user"]]
     if prof.get("socket"):
         args += ["--socket=%s" % prof["socket"]]
+    if database:
+        args += ["--database=%s" % database]
     mode = str(prof.get("ssl_mode", "")).upper()
     if mode:
         if client_is_mariadb(binary):
@@ -220,13 +222,14 @@ def client_args(prof, readonly):
     return args, cnf, pw
 
 
-def run_sql(prof, sql, readonly=True, timeout=60):
-    """Runs sql through the client over stdin. Returns stdout. Raises Fail with a redacted message."""
-    args, cnf, pw = client_args(prof, readonly)
+def run_sql(prof, sql, readonly=True, timeout=60, database=None, prelude=""):
+    """Runs sql through the client over stdin. Returns stdout. Raises Fail with a redacted message.
+    prelude is trusted session setup (SET SESSION ...) built by this tool, sent before the checked statement."""
+    args, cnf, pw = client_args(prof, readonly, database)
     extra = [pw] if pw else []
     try:
         try:
-            r = subprocess.run(args, input=fill_placeholders(sql), capture_output=True, text=True, timeout=timeout)
+            r = subprocess.run(args, input=prelude + fill_placeholders(sql), capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             raise Fail("timeout after %ss; the statement may still be running on the server" % timeout)
         if r.returncode:
@@ -271,6 +274,28 @@ def rows(out):
         return []
     head = lines[0].split("\t")
     return [dict(zip(head, l.split("\t"))) for l in lines[1:]]
+
+
+DB_NAME = re.compile(r"^[A-Za-z0-9_$]{1,64}$")
+DEFAULT_LIMIT, DEFAULT_QUERY_TIMEOUT = 200, 30
+
+
+def run_query(prof, sql, database=None, limit=DEFAULT_LIMIT, timeout=DEFAULT_QUERY_TIMEOUT):
+    """One read-only statement with a row cap and a server-side time limit. Returns (rows, truncated).
+    limit 0 means no cap; the time limit always applies."""
+    stmt = check_readonly(sql)
+    if database is not None and not DB_NAME.match(database):
+        raise Fail("--db must be a plain schema name (letters, digits, _ and $)")
+    if limit < 0 or timeout < 1:
+        raise Fail("--limit must be >= 0 and --timeout >= 1")
+    mariadb = client_is_mariadb(client_binary(prof))
+    pre = ["SET SESSION max_statement_time=%d" % timeout if mariadb else "SET SESSION MAX_EXECUTION_TIME=%d" % (timeout * 1000)]
+    if limit:
+        pre.append("SET SESSION sql_select_limit=%d" % (limit + 1))  # one extra row tells us the result was cut
+    out = rows(run_sql(prof, stmt, timeout=timeout + 5, database=database, prelude=";\n".join(pre) + ";\n"))
+    if limit and len(out) > limit:
+        return out[:limit], True
+    return out, False
 
 
 def q(prof, sql):
@@ -1331,6 +1356,9 @@ def main(argv=None):
     for n in ("info", "inspect", "replica-status"):
         p = sub.add_parser(n); p.add_argument("profile"); p.add_argument("--json", action="store_true"); p.add_argument("--max-lag", type=int, default=30)
     p = sub.add_parser("query"); p.add_argument("profile"); p.add_argument("sql"); p.add_argument("--json", action="store_true")
+    p.add_argument("--db", help="default schema for unqualified table names")
+    p.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="max rows returned (default %d, 0 = no cap)" % DEFAULT_LIMIT)
+    p.add_argument("--timeout", type=int, default=DEFAULT_QUERY_TIMEOUT, help="seconds before the server stops the statement (default %d)" % DEFAULT_QUERY_TIMEOUT)
     p = sub.add_parser("exec"); p.add_argument("profile"); p.add_argument("sql")
     p = sub.add_parser("exec-test"); p.add_argument("profile"); p.add_argument("sql")
     p = sub.add_parser("plan-replica"); p.add_argument("--source", required=True); p.add_argument("--replica", required=True)
@@ -1379,7 +1407,10 @@ def main(argv=None):
             print(json.dumps(r, indent=2) if a.json else "%s\n%s" % (r["verdict"], "\n".join("- " + x for x in r["problems"])))
             return 0 if r["verdict"] in ("OK", "NONE") else 1
         elif a.cmd == "query":
-            emit_rows(rows(run_sql(get_profile(a.profile), check_readonly(a.sql))), a.json)
+            rs, cut = run_query(get_profile(a.profile), a.sql, a.db, a.limit, a.timeout)
+            emit_rows(rs, a.json)
+            if cut:
+                print("-- truncated at %d rows; add a WHERE or a smaller LIMIT, or raise --limit (0 = no cap)" % a.limit, file=sys.stderr)
         elif a.cmd == "exec":
             prof = get_profile(a.profile)
             for s in check_write(a.sql):
