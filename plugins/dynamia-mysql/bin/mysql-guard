@@ -56,6 +56,7 @@ DENY_SQL = [
     (r"\bfind\b[^|;&]*(?:mysql|mariadb)[^|;&]*-delete", "find -delete on a MySQL or MariaDB path"),
 ]
 ASK = [
+    (r"\bmysql-tool\s+run\b", "running a command with the connection's password in its environment"),
     (r"\b(systemctl|service)\b.*\b(restart|stop|start|reload|kill)\b|\bmysqladmin\b.*\b(shutdown|kill|stop-slave|start-slave)\b",
      "start, stop or restart of the server"),
     (r"(?:^|[\s'\";])(?:shutdown|restart)\s*(?:;|['\"]|$)", "SHUTDOWN or RESTART statement"),

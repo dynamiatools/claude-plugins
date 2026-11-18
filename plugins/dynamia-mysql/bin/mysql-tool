@@ -11,6 +11,8 @@ argv, in the output or in this tool's config: a profile names a secret, the secr
   mysql-tool secret-gen NAME [--length N] [--force]
   mysql-tool info|inspect|replica-status PROFILE [--json] [--max-lag N]
   mysql-tool query PROFILE "SELECT ..."      read-only: one SELECT/SHOW/DESCRIBE/EXPLAIN SELECT
+  mysql-tool run PROFILE --env VAR=TEMPLATE ... -- CMD   runs CMD with env vars filled from the connection:
+                                             {host} {port} {user} {password} {db}; the password stays in the child's environment
   mysql-tool exec PROFILE "SQL; SQL"         only the replication-setup statements in WRITE_OK
   mysql-tool plan-replica --source P --replica P --method xtrabackup|mariabackup|clone|dump [--rebuild]
   mysql-tool diagnose REPLICA --source P     why a replica is broken and the safe way out
@@ -441,6 +443,62 @@ def run_query(prof, sql, database=None, limit=DEFAULT_LIMIT, timeout=DEFAULT_QUE
     if limit and len(out) > limit:
         return out[:limit], True
     return out, False
+
+
+RUN_FIELDS = ("host", "port", "user", "password", "db")
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+
+
+def parse_env_specs(specs):
+    out = []
+    for s in specs:
+        name, eq, tpl = s.partition("=")
+        if not eq or not ENV_NAME.fullmatch(name):
+            raise Fail("--env wants VAR=TEMPLATE (VAR is letters, digits, '_'), got %r" % name)
+        bad = [w for w in re.findall(r"\{(\w+)\}", tpl) if w not in RUN_FIELDS]
+        if bad:
+            raise Fail("--env %s: unknown field {%s} (use %s)" % (name, bad[0], ", ".join("{%s}" % f for f in RUN_FIELDS)))
+        out.append((name, tpl))
+    return out
+
+
+def run_with_connection(prof, specs, command):
+    """Runs a command with env vars built from a saved connection. The password reaches only that child's environment (never argv,
+    never this tool's output: the child's output is redacted). Template fields: {host} {port} {user} {password} {db}."""
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        raise Fail("nothing to run: mysql-tool run NAME --env VAR=TEMPLATE ... -- COMMAND [ARGS]")
+    envs = parse_env_specs(specs)
+    if not envs:
+        raise Fail("pass at least one --env VAR=TEMPLATE, for example --env DB_URL=jdbc:mysql://{host}:{port}/{db}")
+    values = {"host": prof.get("host") or "127.0.0.1", "port": str(prof.get("port", 3306)), "user": prof.get("user"), "db": prof.get("db")}
+    if any("{password}" in t for _, t in envs):
+        if not prof.get("secret"):
+            raise Fail("this connection has no secret (only a login_path or socket), so {password} cannot be filled")
+        store = load_secrets()
+        if prof["secret"] not in store:
+            raise Fail("secret %s is not set (user: ! mysql-tool secret-set %s)" % (prof["secret"], prof["secret"]))
+        values["password"] = store[prof["secret"]]
+    child_env = dict(os.environ)
+    for name, tpl in envs:
+        for f in re.findall(r"\{(\w+)\}", tpl):
+            if values.get(f) is None:
+                raise Fail("--env %s uses {%s}, which this connection does not have" % (name, f))
+        child_env[name] = re.sub(r"\{(\w+)\}", lambda m: values[m.group(1)], tpl)
+    try:
+        proc = subprocess.Popen(command, env=child_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
+    except OSError as e:
+        raise Fail("cannot start %s: %s" % (command[0], e))
+    signal.signal(signal.SIGTERM, lambda *_: (proc.terminate(), sys.exit(143)))  # stop the child with us
+    try:
+        for line in proc.stdout:
+            sys.stdout.write(redact(line))
+            sys.stdout.flush()
+        return proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        return proc.wait()
 
 
 def q(prof, sql):
@@ -1514,6 +1572,8 @@ def main(argv=None):
     p.add_argument("--force", action="store_true", help="replace a connection with the same name in that scope")
     p = sub.add_parser("conn-remove"); p.add_argument("name"); p.add_argument("--scope", choices=("user", "workspace"))
     p = sub.add_parser("conn-trust"); p.add_argument("name")
+    p = sub.add_parser("run"); p.add_argument("profile"); p.add_argument("--env", action="append", default=[], metavar="VAR=TEMPLATE")
+    p.set_defaults(command=[])
     p = sub.add_parser("exec"); p.add_argument("profile"); p.add_argument("sql")
     p = sub.add_parser("exec-test"); p.add_argument("profile"); p.add_argument("sql")
     p = sub.add_parser("plan-replica"); p.add_argument("--source", required=True); p.add_argument("--replica", required=True)
@@ -1532,7 +1592,14 @@ def main(argv=None):
     p = sub.add_parser("schema-diff"); p.add_argument("--a", required=True); p.add_argument("--b", required=True); p.add_argument("--schema")
     p = sub.add_parser("monitor"); p.add_argument("profiles", nargs="+"); p.add_argument("--max-lag", type=int, default=30)
     p = sub.add_parser("scan-secrets"); p.add_argument("paths", nargs="*")
+    argv = sys.argv[1:] if argv is None else list(argv)
+    tail = []
+    if argv[:1] == ["run"] and "--" in argv:  # everything after the first -- is the command, untouched by argparse
+        i = argv.index("--")
+        argv, tail = argv[:i], argv[i + 1:]
     a = ap.parse_args(argv)
+    if a.cmd == "run":
+        a.command = tail
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))  # lets `finally` delete the temporary option file
     try:
         if a.cmd == "profiles":
@@ -1603,6 +1670,8 @@ def main(argv=None):
             emit_rows(rs, a.json)
             if cut:
                 print("-- truncated at %d rows; add a WHERE or a smaller LIMIT, or raise --limit (0 = no cap)" % a.limit, file=sys.stderr)
+        elif a.cmd == "run":
+            return run_with_connection(get_profile(a.profile), a.env, a.command)
         elif a.cmd == "exec":
             prof = get_profile(a.profile)
             for s in check_write(a.sql):

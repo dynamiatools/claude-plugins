@@ -35,6 +35,12 @@ Manage them: `conn-list` (names, scope, host, user, db, secret name, never a val
 
 **Precedence** for a name: `profiles.toml`, then the workspace file, then the user file. `env = "test"` and `confirm` are honored only in `profiles.toml` (below), never in a connection file, so a shared file cannot loosen the destructive-SQL guard.
 
+## Run an app with a saved connection
+
+When the user says "use the connection X to launch the app", find the variable names the app expects (its config, `.env.example` or docs; never guess) and run:
+`python3 <plugin>/bin/mysql-tool run X --env SPRING_DATASOURCE_URL=jdbc:mysql://{host}:{port}/{db} --env SPRING_DATASOURCE_USERNAME={user} --env SPRING_DATASOURCE_PASSWORD={password} -- ./mvnw spring-boot:run`
+Fields: `{host} {port} {user} {password} {db}`. The password is placed only in the child's environment, and its output is redacted. A long-lived app goes in the background. The guard asks the user to confirm each `run`. Never echo or print those variables.
+
 ## Advanced: `profiles.toml`
 
 Still supported, and the only place to mark a disposable server for `mysql-tool exec-test`. Write `~/.config/dynamia-mysql/profiles.toml` (no secret in it):
