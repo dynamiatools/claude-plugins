@@ -1,6 +1,6 @@
 ---
 name: report
-description: Shows how work and plan usage are going, with current 5h and weekly usage and pace, where tokens went in recent sessions, and what the action log says (slow or flaky tests, cost per batch). Use when the user asks how it is going, whether tokens are being burned, whether there is enough budget to finish something, or what to optimize.
+description: Shows how work and plan usage are going, with current 5h and weekly usage and pace, where tokens went in recent sessions, and what the action log says (slow or flaky tests, cost per batch). Use when the user asks how it is going, whether tokens are being burned, whether there is enough budget to finish something, or what to optimize. Triggers on "cómo voy de uso del plan", "estoy gastando muchos tokens".
 argument-hint: "[days]"
 allowed-tools: Bash(ms-workspace usage:*) Bash(ms-workspace insights:*) Bash(ms-workspace tokens:*) Bash(ms-workspace budget:*) Bash(ms-workspace memory:*)
 ---

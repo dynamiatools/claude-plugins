@@ -1,6 +1,6 @@
 ---
 name: workspace-init
-description: Creates (or updates) a workspace in a .dynamia/ folder. Inside a git repo it makes a one-repo workspace and excludes .dynamia/ locally; elsewhere it asks which repos to include, clones the missing ones, detects each stack and base branch, asks for dependencies, e2e and release branches. It writes workspace.toml and respects an existing CLAUDE.md, asking before adding the workspace block. Use when the user wants to set up a new workspace, add a repo to an existing one, bootstrap a new machine, or move an older workspace into .dynamia/.
+description: Creates or updates a dynamia workspace in a .dynamia folder - inside a git repo a one-repo workspace, elsewhere it asks which repos to include, clones the missing ones, detects stacks and base branches, and writes workspace.toml without overwriting an existing CLAUDE.md. Use when the user wants to set up a workspace, add a repo to one, bootstrap a new machine or move an older workspace into .dynamia. Triggers on "crea un workspace", "agrega este repo al workspace".
 ---
 
 # dynamia:workspace-init

@@ -1,6 +1,6 @@
 ---
 name: ux-review
-description: Reviews a UI for usability and accessibility, on desktop web and on mobile, then fixes it with approval. For web apps used on a phone it checks the conventions of current mobile apps. Use when the user asks to review, audit or improve the UX, accessibility, responsive behavior or mobile experience of a screen, component or diff.
+description: Reviews a UI for usability and accessibility, on desktop web and on mobile, then fixes it with approval. For web apps used on a phone it checks the conventions of current mobile apps. Use when the user asks to review, audit or improve the UX, accessibility, responsive behavior or mobile experience of a screen, component or diff. Triggers on "revisa esta pantalla", "no es accesible", "se ve mal en el celular".
 argument-hint: "[path or screen] [review|fix]"
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: replication
-description: Checks the health of MySQL, Percona or MariaDB replication with mysql-tool replica-status - IO and SQL threads, lag, errors, GTID positioning - across both naming families, and explains what a failure means. Use when the user asks if a replica is healthy, why replication stopped, or how far behind a replica is.
+description: Checks the health of MySQL, Percona or MariaDB replication with mysql-tool replica-status - IO and SQL threads, lag, errors, GTID positioning - and explains what a status means. Use when the user asks whether a replica is healthy or how far behind it is; when it is broken and must be fixed, use repair. Triggers on "cómo va la replicación", "cuánto lag tiene la réplica".
 ---
 
 # replication

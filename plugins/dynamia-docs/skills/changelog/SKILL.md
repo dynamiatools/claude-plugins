@@ -1,6 +1,6 @@
 ---
 name: changelog
-description: Writes changelogs and release notes with Keep a Changelog 1.1.0, Semantic Versioning 2.0.0 and Conventional Commits 1.0.0 - choosing the next version, grouping changes for humans, flagging breaking changes and deprecations, and drafting notes from git history. Use when preparing a release, writing or updating CHANGELOG.md, deciding the next version number, writing commit messages, or announcing breaking changes.
+description: Writes changelogs and release notes with Keep a Changelog, Semantic Versioning and Conventional Commits - picks the next version, groups changes for humans, flags breaking changes and drafts notes from git history. Use when preparing a release, writing or updating CHANGELOG.md, deciding the next version number, writing commit messages or announcing breaking changes. Triggers on "prepara el changelog", "notas de la versión".
 argument-hint: "[version or range]"
 ---
 

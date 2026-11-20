@@ -1,6 +1,6 @@
 ---
 name: git-status
-description: Shows a compact, emoji-based status card for the git repo in the current directory (branch, last commit, working tree, main/master vs remote, pending PR, active issue and a to-do list). Read-only. Use when the user asks for the repo status, where things stand, or what is pending in the current branch.
+description: Shows a compact, emoji-based status card for the git repo in the current directory (branch, last commit, working tree, main/master vs remote, pending PR, active issue and a to-do list). Read-only. Use when the user asks for the repo status, where things stand, or what is pending in the current branch. Triggers on "cómo va el repo", "qué está pendiente en esta rama".
 ---
 
 # dynamia:git-status

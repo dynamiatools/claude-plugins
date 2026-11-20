@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Finishes the dynamia install, the part a plugin cannot do itself, namely the status line and permissions in settings.json, the global instructions in ~/.claude/DYNAMIA.md imported from ~/.claude/CLAUDE.md, and the ms-workspace and ms-statusline launchers in ~/.local/bin. It merges without overwriting your entries. Use right after installing the plugin, after a plugin update, or when any of those is missing.
+description: Finishes the dynamia install, the part a plugin cannot do itself - status line and permissions in settings.json, the global instructions in ~/.claude/DYNAMIA.md, and the ms-workspace and ms-statusline launchers in ~/.local/bin - merging without overwriting your entries. Use right after installing or updating the plugin, or when any of those is missing.
 argument-hint: "[--project] [--remove]"
 disable-model-invocation: true
 allowed-tools: Bash(ms-workspace doctor:*), Bash(ms-workspace --help:*)

@@ -1,6 +1,6 @@
 ---
 name: einvoicing
-description: Guides building and reviewing Colombian electronic invoicing (DIAN) in software - factura electrónica de venta, notas crédito y débito, documento equivalente (POS), documento soporte, nómina electrónica, RADIAN - covering numbering, CUFE, signing, validación previa, contingency and the technical annex. Use when a task designs, implements, debugs or reviews electronic invoicing or any DIAN electronic document.
+description: Guides building and reviewing Colombian electronic invoicing (DIAN) - factura electrónica de venta, notas crédito y débito, documento equivalente POS, documento soporte, nómina electrónica, RADIAN, numbering, CUFE, signing, validación previa and contingency. Use when a task designs, implements, debugs or reviews electronic invoicing or any DIAN electronic document. Triggers on "factura electrónica", "CUFE", "nota crédito".
 argument-hint: "[document type or question]"
 ---
 

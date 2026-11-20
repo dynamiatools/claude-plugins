@@ -1,6 +1,6 @@
 ---
 name: coroutines
-description: Guides Kotlin coroutines on the JVM - structured concurrency, dispatchers, cancellation and timeouts, exception handling, Flow, channels, shared mutable state, testing with runTest - and when to use coroutines versus Java virtual threads. Use when writing or reviewing suspend functions, launch or async, Flow, Ktor handlers, or concurrency bugs in Kotlin.
+description: Guides Kotlin coroutines on the JVM - structured concurrency, dispatchers, cancellation and timeouts, Flow, channels, shared state, runTest - and coroutines versus Java virtual threads. Use whenever Kotlin code has suspend, launch, async, GlobalScope, Flow or a coroutine scope, including a quick review or fix. Triggers on "revisa esta corrutina", "leaks a coroutine scope", "el Flow no cancela".
 argument-hint: "[file or problem]"
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: test
-description: Runs the workspace test levels with ms-workspace test, t0 for what changed here, t1 for a whole batch, t2 for end to end. Use when the user asks to test, run the tests or check that a change works.
+description: Runs the dynamia workspace test levels with ms-workspace test - t0 for what changed, t1 for a whole batch, t2 for end to end. Use when the user asks to run or validate the tests of a workspace or batch, inside a dynamia workspace (a .dynamia/workspace.toml exists). Triggers on "corre los tests de lo que cambié", "valida el batch".
 argument-hint: "t0 | t1 [batch] | t2 [batch]"
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: recall
-description: Full-text search over past Claude Code sessions, memory notes and the action log with ms-workspace recall. Read-only. Use when the user asks where something was decided, what was tried before, or to find an earlier conversation.
+description: Full-text search over past Claude Code sessions, memory notes and the action log with ms-workspace recall. Read-only. Use when the user asks where something was decided, what was tried before, or to find an earlier conversation. Triggers on "dónde decidimos esto", "busca en las sesiones anteriores".
 argument-hint: "<words...> [--kind K] [-n N]"
 ---
 

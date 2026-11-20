@@ -1,6 +1,6 @@
 ---
 name: vue-frontend
-description: Frontend work against a Dynamia Platform backend with the @dynamia-tools npm packages - sdk (DynamiaClient), ui-core, vue (DynamiaVue plugin, DynamiaViewer, composables), microfrontend-bridge and the extension SDKs (dashboard, reports, saas, files, http-functions). Use when a package.json depends on @dynamia-tools/*, when building Vue/TypeScript screens for a Dynamia API, or when choosing how to combine Vue with ZK.
+description: Frontend work against a Dynamia Platform backend with the @dynamia-tools npm packages - sdk (DynamiaClient), ui-core, vue (DynamiaVue, DynamiaViewer, composables), microfrontend-bridge and the extension SDKs. Use when a package.json depends on @dynamia-tools/*, when building Vue or TypeScript screens for a Dynamia API, or when combining Vue with ZK.
 ---
 
 # dynamia-platform:vue-frontend

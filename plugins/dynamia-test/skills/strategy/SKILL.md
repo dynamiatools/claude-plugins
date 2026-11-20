@@ -1,6 +1,6 @@
 ---
 name: strategy
-description: Decides what to test and at which level, designs and reviews tests - behavior over implementation, determinism, fixtures and builders, naming, test smells - and sets a test plan for a change. Use when planning tests for a feature or bug fix, reviewing a test suite or a test file, deciding between unit, integration, contract and end-to-end tests, or when tests are slow, brittle or meaningless.
+description: Decides what to test and at which level, designs and reviews tests - behavior over implementation, determinism, fixtures and builders, naming, test smells - and sets a test plan for a change. Use when planning tests for a feature or bug fix, reviewing a test suite or a test file, deciding between unit, integration, contract and end-to-end tests, or when tests are slow, brittle or meaningless. Triggers on "qué debería testear", "los tests son lentos o frágiles".
 argument-hint: "[change or test file]"
 ---
 
