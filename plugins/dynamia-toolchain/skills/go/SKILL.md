@@ -1,6 +1,6 @@
 ---
 name: go
-description: Downloads, lists, loads and removes Go toolchains into ~/.toolchains/go, or into the repo and git-ignored when the user asks. Use when go is missing, a module needs a specific Go version, or the user wants Go without a version manager.
+description: Downloads, lists, loads and removes Go toolchains into ~/.toolchains/go, or into the repo and git-ignored when the user asks. Use when go is missing, a module needs a specific Go version, or the user wants Go without a version manager. Triggers on prompts like "install go 1.23", "instala go" or "necesito golang".
 ---
 
 # Go

@@ -1,6 +1,6 @@
 ---
 name: gradle
-description: Downloads, lists, loads and removes Gradle versions into ~/.toolchains/gradle, or into the repo and git-ignored when the user asks. Use when gradle is missing and the project has no gradlew, or a specific Gradle version is needed.
+description: Downloads, lists, loads and removes Gradle versions into ~/.toolchains/gradle, or into the repo and git-ignored when the user asks. Use when gradle is missing and the project has no gradlew, or a specific Gradle version is needed. Triggers on prompts like "install gradle 8", "instala gradle" or "no tengo gradle".
 ---
 
 # Gradle

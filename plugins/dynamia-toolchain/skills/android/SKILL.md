@@ -1,6 +1,6 @@
 ---
 name: android
-description: Installs the Android SDK command-line tools into ~/.toolchains/android, then adds SDK packages (platform-tools, platforms, build-tools) with sdkmanager, or inside the repo and git-ignored when the user asks. Use when adb, sdkmanager, ANDROID_HOME or an Android build is missing.
+description: Installs the Android SDK command-line tools into ~/.toolchains/android, then adds SDK packages (platform-tools, platforms, build-tools) with sdkmanager, or inside the repo and git-ignored when the user asks. Use when adb, sdkmanager, ANDROID_HOME or an Android build is missing. Triggers on prompts like "install the android sdk", "instala el sdk de android" or "no tengo adb".
 ---
 
 # Android SDK

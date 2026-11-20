@@ -1,6 +1,6 @@
 ---
 name: rust
-description: Installs, lists, loads and removes Rust toolchains (cargo, rustc) into ~/.toolchains/rust through the official rustup-init, without touching shell files, or into the repo and git-ignored when the user asks. Use when cargo or rustc is missing or a crate needs a specific Rust version.
+description: Installs, lists, loads and removes Rust toolchains (cargo, rustc) into ~/.toolchains/rust through the official rustup-init, without touching shell files, or into the repo and git-ignored when the user asks. Use when cargo or rustc is missing or a crate needs a specific Rust version. Triggers on prompts like "install cargo", "instala rust" or "necesito rustc".
 ---
 
 # Rust and cargo

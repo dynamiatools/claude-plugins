@@ -1,6 +1,6 @@
 ---
 name: jdk
-description: Downloads, lists, loads and removes JDKs of any distribution (Temurin, Corretto, Zulu, GraalVM, Liberica, Microsoft and more) into ~/.jdks, or into the repo and git-ignored when the user asks. Use when a JDK or a Java version is missing, when a build needs another distribution, or when JAVA_HOME must point somewhere else.
+description: Downloads, lists, loads and removes JDKs of any distribution (Temurin, Corretto, Zulu, GraalVM, Liberica, Microsoft and more) into ~/.jdks, or into the repo and git-ignored when the user asks. Use when a JDK or a Java version is missing, when a build needs another distribution, or when JAVA_HOME must point somewhere else. Triggers on prompts like "install java 17", "instala java 17 en el repo", "usa Corretto 21" or "necesito un JDK".
 ---
 
 # JDKs, any distribution

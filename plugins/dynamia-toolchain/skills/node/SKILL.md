@@ -1,6 +1,6 @@
 ---
 name: node
-description: Downloads, lists, loads and removes Node.js versions (npm and npx included) from nodejs.org into ~/.toolchains/node, or into the repo and git-ignored when the user asks. Use when a Node or npm version is missing, a project needs another major, or the user wants Node without a version manager.
+description: Downloads, lists, loads and removes Node.js versions (npm and npx included) from nodejs.org into ~/.toolchains/node, or into the repo and git-ignored when the user asks. Use when a Node or npm version is missing, a project needs another major, or the user wants Node without a version manager. Triggers on prompts like "install node 20", "instala node lts" or "necesito npm".
 ---
 
 # Node.js and npm

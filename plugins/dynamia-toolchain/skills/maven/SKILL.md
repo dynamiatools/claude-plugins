@@ -1,6 +1,6 @@
 ---
 name: maven
-description: Downloads, lists, loads and removes Apache Maven versions into ~/.toolchains/maven, or into the repo and git-ignored when the user asks. Use when mvn is missing, a project needs a specific Maven version, or there is no mvnw wrapper.
+description: Downloads, lists, loads and removes Apache Maven versions into ~/.toolchains/maven, or into the repo and git-ignored when the user asks. Use when mvn is missing, a project needs a specific Maven version, or there is no mvnw wrapper. Triggers on prompts like "install maven", "instala maven 3.9" or "no tengo mvn".
 ---
 
 # Apache Maven
