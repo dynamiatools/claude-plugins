@@ -201,6 +201,8 @@ def confirm_reasons(root, command: str) -> list[str]:
         sub = words[0] if words else ""
         if sub == "clean" and "--force" in args:
             out.append("clean --force discards a batch that is not merged")
+        elif sub == "thanos" and words[1:2] == ["launch"] and "--yes" in args:
+            out.append("thanos launch starts an autonomous mission in its own tmux session")
         elif sub == "merge" and "--yes" in args:
             out.append("merge merges the pull request into the base branch")
         elif sub == "ship" and "--yes" in args:

@@ -5117,6 +5117,128 @@ esac
         self.assertEqual(thanos_guard._ms(["merge", "b1"], ["merge", "b1"])[0], "block")
 
 
+# ----------------------------------------------------------- tmux and THANOS launch
+FAKE_TMUX = r"""#!/usr/bin/env python3
+import os, sys
+d = os.environ["FAKE_TMUX_DIR"]
+a = sys.argv[1:]
+open(os.path.join(d, "calls.log"), "a").write(" ".join(a) + "\n")
+def name(t): return t.lstrip("=").rstrip(":")
+def path(n): return os.path.join(d, "s_" + n)
+cmd = a[0] if a else ""
+if cmd == "has-session":
+    sys.exit(0 if os.path.exists(path(name(a[a.index("-t") + 1]))) else 1)
+if cmd == "new-session":
+    n = a[a.index("-s") + 1]
+    open(path(n), "w").write(os.environ.get("FAKE_SCREEN", "❯ \n"))
+    open(os.path.join(d, "dir_" + n), "w").write(a[a.index("-c") + 1])
+elif cmd == "list-sessions":
+    names = sorted(f[2:] for f in os.listdir(d) if f.startswith("s_"))
+    if not names: sys.exit(1)
+    for n in names: print(f"{n}\t1\t0\t" + open(os.path.join(d, "dir_" + n)).read())
+elif cmd == "capture-pane":
+    n = name(a[a.index("-t") + 1])
+    if not os.path.exists(path(n)): sys.exit(1)
+    sys.stdout.write(open(path(n)).read())
+elif cmd == "kill-session":
+    os.remove(path(name(a[a.index("-t") + 1])))
+"""
+
+
+class TestTmuxAndLaunch(Base):
+    def setUp(self):
+        super().setUp()
+        self.bin = self.ws.tmp / "tbin"
+        self.bin.mkdir()
+        self.state = self.ws.tmp / "tmuxstate"
+        self.state.mkdir()
+        (self.bin / "tmux").write_text(FAKE_TMUX)
+        (self.bin / "claude").write_text("#!/bin/sh\nexit 0\n")
+        for f in ("tmux", "claude"):
+            (self.bin / f).chmod(0o755)
+        self.env = {"PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_TMUX_DIR": str(self.state)}
+
+    def ms(self, *args):
+        return self.ws.ms(*args, env=self.env)
+
+    def screen(self, name, text):
+        (self.state / f"s_{name}").write_text(text)
+        (self.state / f"dir_{name}").write_text("/w")
+
+    def test_ls_guesses_the_state_from_the_screen_and_masks_secrets(self):
+        self.screen("a", "working...\n  esc to interrupt\n")
+        self.screen("b", "Do you want to proceed?\n❯ 1. Yes\n  2. No\n")
+        self.screen("c", "done\n╭────╮\n│ ❯  │\n╰────╯\n")
+        self.screen("d", "[claude exited: press Enter to close]")
+        out = self.ms("tmux", "ls").stdout
+        for name, state in (("a", "working"), ("b", "needs-you"), ("c", "idle"), ("d", "exited")):
+            self.assertRegex(out, rf"(?m)^{name}\s+{state}\b")
+        self.screen("e", "token = " + fake("ghp_", "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8") + "\n")
+        shown = self.ms("tmux", "status", "e").stdout
+        self.assertIn("***", shown)
+        self.assertNotIn("a1B2c3D4", shown)
+        self.assertEqual(self.ms("tmux", "status", "missing").returncode, 1)
+
+    def test_send_types_only_into_an_idle_session(self):
+        self.screen("a", "working\n esc to interrupt\n")
+        r = self.ms("tmux", "send", "a", "hello")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not idle", r.stdout + r.stderr)
+        self.screen("a", "│ ❯ │\n")
+        self.assertOk(self.ms("tmux", "send", "a", "hello", "there"))
+        calls = (self.state / "calls.log").read_text()
+        self.assertIn("send-keys -t =a: -l hello there", calls)
+        self.assertIn("send-keys -t =a: Enter", calls)
+
+    def test_launch_needs_yes_and_starts_one_session_in_the_worktree(self):
+        d = self.ws.batch("thanos-x", "lib")
+        r = self.ms("thanos", "launch", "thanos-x", "--goal", "do it")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("Nothing started", r.stdout)
+        self.assertFalse((self.state / "s_thanos-x").exists())
+        r = self.ms("thanos", "launch", "thanos-x", "--goal", "do it", "--max-steps", "12", "--no-remote", "--yes")
+        self.assertOk(r)
+        self.assertTrue((self.state / "s_thanos-x").exists())
+        self.assertEqual((self.state / "dir_thanos-x").read_text(), str(d / "lib"))
+        calls = (self.state / "calls.log").read_text()
+        self.assertIn("/dynamia:thanos --from-brief", calls)
+        self.assertIn("--max-steps 12", calls)
+        self.assertIn("do it", (d / "THANOS-BRIEF.md").read_text())
+        again = self.ms("thanos", "launch", "thanos-x", "--no-remote", "--yes")
+        self.assertEqual(again.returncode, 1)
+        self.assertIn("already exists", again.stdout + again.stderr)
+
+    def test_launch_without_a_brief_or_a_batch_fails_and_a_mission_cannot_launch_one(self):
+        self.ws.batch("thanos-y", "lib")
+        r = self.ms("thanos", "launch", "thanos-y", "--yes", "--no-remote")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no brief", r.stdout + r.stderr)
+        sys.path.insert(0, str(REPO / "lib"))
+        self.assertEqual(self.ms("thanos", "launch", "nope", "--goal", "g", "--yes").returncode, 1)
+        from ms_workspace import guard
+        self.assertTrue(guard.confirm_reasons(self.ws.root, "ms-workspace thanos launch b --yes"), "the prompt is a second confirmation")
+        self.assertEqual(guard.confirm_reasons(self.ws.root, "ms-workspace thanos launch b"), [])
+        sys.path.insert(0, str(REPO / "lib"))
+        from ms_workspace import thanos_guard
+        m = {"batch_path": "/tmp/claude-1000/b", "deny_hosts": []}
+        self.assertEqual(thanos_guard.verdict("ms-workspace thanos launch b --yes", m, cwd="/tmp/claude-1000/b")[0], "block")
+        self.assertEqual(thanos_guard.verdict("ms-workspace tmux send x hi", m, cwd="/tmp/claude-1000/b")[0], "block")
+        self.assertEqual(thanos_guard.verdict("ms-workspace tmux ls", m, cwd="/tmp/claude-1000/b")[0], "allow")
+
+    def test_sessions_lists_only_thanos_sessions_with_the_mission_and_flags_a_prompt(self):
+        self.ws.batch("thanos-z", "lib")
+        self.assertOk(self.ms("thanos", "launch", "thanos-z", "--goal", "g", "--no-remote", "--yes"))
+        self.screen("other", "❯ \n")
+        self.screen("thanos-z", "Do you want to proceed?\n❯ 1. Yes\n")
+        out = self.ms("thanos", "sessions", "--lines", "2").stdout
+        self.assertIn("thanos-z  [needs-you]", out)
+        self.assertIn("tmux attach -t thanos-z", out)
+        self.assertNotIn("other", out)
+        data = json.loads(self.ms("thanos", "sessions", "--json").stdout)
+        self.assertEqual([x["name"] for x in data], ["thanos-z"])
+        self.assertEqual(data[0]["batch"], "thanos-z")
+
+
 # --------------------------------------------------------------------- THANOS
 class TestThanosVerdict(unittest.TestCase):
     """The strict profile approves a smoke test of the mission's own server without a prompt, and still stops the risky variants."""

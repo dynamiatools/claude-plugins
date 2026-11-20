@@ -1,8 +1,8 @@
 ---
 name: thanos
 description: Runs a complex goal from start to finish with minimal interruptions, inside its own batch worktree, with a branch per task, a step cap, a strict guard and at most three Opus reviews. Use only when the user explicitly asks for THANOS, an autonomous mission, or to "do it all yourself".
-argument-hint: "<goal> [--max-steps N] | extend <batch> <goal>"
-allowed-tools: Bash(ms-workspace thanos:*) Bash(ms-workspace usage:*) Bash(ms-workspace batch new:*) Bash(ms-workspace status:*) Bash(ms-workspace test:*) Bash(ms-workspace integrate:*)
+argument-hint: "<goal> [--max-steps N] | --background <goal> | --from-brief <file> | extend <batch> <goal>"
+allowed-tools: Bash(ms-workspace thanos:*) Bash(ms-workspace usage:*) Bash(ms-workspace batch new:*) Bash(ms-workspace status:*) Bash(ms-workspace test:*) Bash(ms-workspace integrate:*) Bash(ms-workspace tmux:*)
 ---
 
 # dynamia:thanos
@@ -21,6 +21,17 @@ Print those two lines when you start (prefix the second with 🟣). The user def
 - Start dev servers and watchers with `ms-workspace thanos run --name web -- pnpm dev`; they are the mission's own and `ms-workspace thanos kill web` (or `kill <pid>`) stops them, and `pause`, `done` and `stop` clean them up. Plain `kill`/`pkill` work only on processes that work inside the batch; never kill one you did not start.
 - A side panel with the task list (`/dynamia-thanos-panel`) opens by itself at `thanos start` and follows `THANOS.md`: keep the task lines current.
 - It never ships and never opens a PR. Integrating and publishing stay with the user.
+
+## Background mode: `--background <goal>`
+Runs the mission in a **new main session of its own in tmux**, so this session stays free. Use it when the user asks for the mission "in the background", "in another session" or "in tmux". You do **not** run the mission here: you prepare it, ask, launch and report.
+1. `ms-workspace usage --check --need 20` as in step 0 below.
+2. **Always ask first, even when the request is clear**, with one `AskUserQuestion` round: the goal in one sentence, the success criteria (each checkable with a command or a file), which repos, the step cap, and the confirmation that it should start now in a background tmux session. This is the only question round of the whole mission; the launch below refuses to run without it.
+3. `ms-workspace batch new thanos-<slug> <repos...>` and write the answers to `<batch>/THANOS-BRIEF.md` (Goal, Success criteria, Repos, Step cap, anything the user said about priorities).
+4. `ms-workspace thanos launch <batch> --yes [--max-steps N | --until-usage PCT]`. Claude Code asks the user once more to approve it; that is expected. It starts `thanos-<batch>` in tmux and runs `/dynamia:thanos --from-brief <batch>/THANOS-BRIEF.md` there.
+5. Report in two lines: the session name, and how to follow it: `ms-workspace thanos sessions` (state and last screen lines; `needs-you` means a permission prompt waits), `tmux attach -t thanos-<batch>` or claude.ai/code (Remote Control). Then stop: do not start the mission, do not poll. When the user asks "how is it going", run `ms-workspace thanos sessions` (or `ms-workspace thanos status <batch>`); it only reads. Never type into the session unless the user asks: `ms-workspace tmux send` refuses while the session is not idle.
+
+## `--from-brief <file>` (the session that `launch` started)
+The user already confirmed everything in the launching session. Read the brief, **skip step 1 (the question round) and step 2 (the batch exists and you start inside its worktree)**, and go on from step 3. Do not ask anything, then or later. If the brief lacks a success criterion that can be checked, write the most reasonable one under `## Decisions` and go on.
 
 ## Steps
 

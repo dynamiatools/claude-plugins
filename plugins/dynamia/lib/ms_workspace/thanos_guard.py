@@ -43,7 +43,7 @@ DANGEROUS_ENV = re.compile(r"^(GH_BROWSER|GH_PAGER|GH_EDITOR|BROWSER|PAGER|GIT_P
 GH_READ = {"issue": {"view", "list", "status"}, "pr": {"view", "list", "checks", "diff", "status"}, "repo": {"view"},
            "run": {"view", "list"}, "release": {"view", "list"}}
 MS_SAFE = {"status", "log", "usage", "plan", "test", "integrate", "affected", "context", "memory", "recall", "doctor", "gate", "budget",
-           "insights", "tokens", "thanos", "handoff", "modules", "junit", "sys", "images", "claude-md", "open", "contract"}
+           "insights", "tokens", "thanos", "tmux", "handoff", "modules", "junit", "sys", "images", "claude-md", "open", "contract"}
 MS_BLOCK = {"ship", "merge", "clean", "undo", "promote", "setup-hooks", "notify", "batch", "branch", "release"}
 CURL_WRITE = re.compile(r"(^|\s)(-X\s*(POST|PUT|DELETE|PATCH)|--request\s+(POST|PUT|DELETE|PATCH)|-d\b|--data\S*|-F\b|--form\b|-T\b|--upload-file|--json\b)", re.I)
 PIPE_TO_SHELL = re.compile(r"\|\s*(sudo\s+)?(ba|z|da|k)?sh\b")
@@ -325,6 +325,10 @@ def _ms(words: list[str], args: list[str], m: dict | None = None) -> tuple[str, 
     sub = words[0] if words else ""
     if sub in MS_BLOCK:
         return "block", f"ms-workspace {sub} is for the user, not for a THANOS mission"
+    if sub == "thanos" and words[1:2] == ["launch"]:
+        return "block", "a THANOS mission does not launch other missions"
+    if sub == "tmux" and words[1:2] == ["send"]:
+        return "block", "ms-workspace tmux send types into another session: that is for the user"
     if sub == "env" and "--trust" in args:
         return "block", "ms-workspace env --trust"
     if sub == "ps" and words[1:2] == ["kill"]:

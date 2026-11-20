@@ -14,6 +14,8 @@
     ms-workspace thanos unblock <task>            put a parked [!] task back to open once what blocked it is allowed
     ms-workspace thanos allow-suggest [--json]    permission rules for the commands the strict guard left to the normal prompt
     ms-workspace thanos extend <batch> --goal T [--check] [--skip-tests]   validate a finished mission, then start a new one on top of it
+    ms-workspace thanos launch <batch> [--brief FILE | --goal T] [--max-steps N | --until-usage PCT] [--yes]   run the mission in its own tmux session (needs --yes)
+    ms-workspace thanos sessions [--lines N] [--json]   the thanos-* tmux sessions: mission summary, guessed state, last screen lines
     ms-workspace thanos stop-hook | context       hooks (Stop, SessionStart)
     ms-workspace thanosguard                      hook (PreToolUse for Edit, Write and Agent)
 
@@ -265,15 +267,18 @@ def cmd_thanos(ws: Workspace | None, args: list[str]) -> int:
         return (_procs if sub == "procs" else _kill_cmd)(ws, rest)
     if ws is None:
         die("THANOS needs a workspace (run the dynamia:workspace-init skill first)")
+    if sub in ("launch", "sessions"):
+        from . import thanos_launch
+        return (thanos_launch.launch if sub == "launch" else thanos_launch.list_sessions)(ws, rest)
     handler = {"start": _start, "resume": _resume, "estimate": _estimate, "status": _status, "task": _task, "block": _block,
                "wait": _wait, "pause": _pause, "done": _done, "stop": _stop, "run": _run, "unblock": _unblock,
                "allow-suggest": _allow_suggest, "extend": _extend}.get(sub)
     if handler is None:
-        die("usage: thanos start|resume|extend|estimate|status|task|block|unblock|wait|run|procs|kill|allow-suggest|pause|done|stop|panel (see ms-workspace help)")
+        die("usage: thanos start|resume|extend|launch|sessions|estimate|status|task|block|unblock|wait|run|procs|kill|allow-suggest|pause|done|stop|panel (see ms-workspace help)")
     return handler(ws, rest)
 
 
-VALUE_FLAGS = {"--session", "--name", "--goal", "--max-steps", "--max-opus", "--opus-used", "--until-usage", "--push-every", "--deny-host", "--task"}
+VALUE_FLAGS = {"--session", "--name", "--goal", "--max-steps", "--max-opus", "--opus-used", "--until-usage", "--push-every", "--deny-host", "--task", "--brief", "--lines"}
 
 
 def num_str(x: float) -> str:
