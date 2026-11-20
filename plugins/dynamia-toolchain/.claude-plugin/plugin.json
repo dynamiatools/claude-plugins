@@ -1,0 +1,11 @@
+{
+  "name": "dynamia-toolchain",
+  "version": "0.1.0",
+  "author": {
+    "name": "Mario Serrano"
+  },
+  "description": "Download, check and switch JDKs and Node.js (with npm) from one place: any JDK distribution through the Foojay Disco API, Node.js from nodejs.org, checksums always verified, kept in your home folder or inside the repo (git-ignored) when you ask.",
+  "license": "MIT",
+  "homepage": "https://github.com/dynamiatools/claude-plugins/tree/master/plugins/dynamia-toolchain",
+  "repository": "https://github.com/dynamiatools/claude-plugins"
+}

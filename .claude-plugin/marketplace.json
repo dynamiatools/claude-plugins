@@ -28,7 +28,7 @@
     {
       "name": "dynamia-colombia",
       "source": "./plugins/dynamia-colombia",
-      "description": "Colombian tax and compliance for Claude Code: DIAN glossary, electronic invoicing, informaci\u00f3n ex\u00f3gena (medios magn\u00e9ticos), taxes, and how to find and cite current rules from official sources."
+      "description": "Colombian tax and compliance for Claude Code: DIAN glossary, electronic invoicing, información exógena (medios magnéticos), taxes, and how to find and cite current rules from official sources."
     },
     {
       "name": "dynamia-java",
@@ -94,6 +94,11 @@
       "name": "dynamia-eval",
       "source": "./plugins/dynamia-eval",
       "description": "Local rule evaluation: keep rules in the project, check any text against them with fast deterministic checks plus one judging pass, and draft the rules from a conversation."
+    },
+    {
+      "name": "dynamia-toolchain",
+      "source": "./plugins/dynamia-toolchain",
+      "description": "Download, check and switch JDKs (any distribution), Node.js with npm, Maven, Gradle, Go, Rust and the Android SDK, with verified checksums, in your home folder or in the repo (git-ignored) when you ask."
     }
   ]
 }
