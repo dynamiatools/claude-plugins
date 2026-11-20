@@ -5133,6 +5133,13 @@ class TestThanosVerdict(unittest.TestCase):
                "curl -s http://localhost:3100/api/health; ms-workspace thanos kill web 2>&1 | tail -1")
         self.assertEqual(self.kind(cmd), "allow")
 
+    def test_a_python_heredoc_that_only_edits_files_in_the_batch_runs_without_a_prompt(self):
+        edit = "python3 - <<'EOF'\np='e2e/a.ts'\ns=open(p).read().replace('a','b')\nopen(p,'w').write(s)\nEOF"
+        self.assertEqual(self.kind(edit), "allow")
+        for body in ("import subprocess\nsubprocess.run(['ls'])", "import os\nos.system('ls')", "import urllib.request", "open('~/.ssh/id_rsa').read()"):
+            self.assertEqual(self.kind(f"python3 - <<'EOF'\n{body}\nEOF"), "ask", body)
+        self.assertEqual(self.kind("python3 - <<'EOF'\nopen('/etc/passwd').read()\nEOF"), "block")
+
     def test_remote_saving_sending_and_nested_substitutions_are_not_approved(self):
         self.assertEqual(self.kind("curl -s https://example.com/x"), "ask")
         self.assertEqual(self.kind("curl -s -o out.bin http://localhost:3000/"), "ask")

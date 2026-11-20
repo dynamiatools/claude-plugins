@@ -57,6 +57,30 @@ LOCAL_URL = re.compile(r"^(https?://)?(localhost|127(\.\d+){3}|\[::1\]|0\.0\.0\.
 REMOTE_URL = re.compile(r"^https?://|^[\w-]+(\.[\w-]+)+(:\d+)?(/\S*)?$", re.I)
 
 
+# A `python3 - <<EOF` script that edits files is the usual way to patch a file. It is approved only when its text shows nothing that
+# leaves the batch: no network, no subprocess, no delete or move, no eval, only a few harmless imports and no path outside the batch.
+PY_HEREDOC = re.compile(r"(?:^|(?<=[;&|\n]))[ \t]*python3?[ \t]+-?[ \t]*<<-?[ \t]*(['\"]?)(\w+)\1[ \t]*\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
+PY_IMPORT_OK = {"re", "json", "sys", "pathlib", "textwrap", "io", "string", "collections", "itertools", "difflib", "csv", "math", "datetime"}
+PY_BAD = re.compile(r"\b(subprocess|socket|urllib|requests|http|ftplib|smtplib|shutil|ctypes|importlib|pickle|marshal|eval|exec|__import__|"
+                    r"getattr|setattr|globals|locals|input|breakpoint)\b|\bos\s*\.\s*(?!path\b)\w+|\.(unlink|rmdir|rmtree|rename|chmod|chown|symlink_to|"
+                    r"hardlink_to|touch|mkdir|rmdir)\s*\(|\bsys\s*\.\s*(modules|path)")
+
+
+def _py_safe(body: str, m: dict, cwd: str) -> bool:
+    for mt in re.finditer(r"^\s*(?:from\s+(\w+)|import\s+([\w., ]+))", body, re.M):
+        mods = [mt.group(1)] if mt.group(1) else [x.strip().split(" as ")[0].split(".")[0] for x in mt.group(2).split(",")]
+        if any(x not in PY_IMPORT_OK for x in mods):
+            return False
+    if PY_BAD.search(body):
+        return False
+    for lit in re.findall(r"""(?<![\w])[rbfu]{0,2}(?:'([^'\n]*)'|"([^"\n]*)")""", body):
+        text = lit[0] or lit[1]
+        if text.startswith(("/", "~")) or text == ".." or text.startswith("../") or "/../" in text:
+            if not inside(text, m, cwd):
+                return False
+    return True
+
+
 def _roots(m: dict) -> list[str]:
     scratch = f"/tmp/claude-{os.getuid()}" if hasattr(os, "getuid") else "/tmp/claude"
     return [os.path.realpath(m["batch_path"]), scratch]
@@ -455,6 +479,7 @@ def _classify(seg: list[str], m: dict, cwd: str, moved: bool, deny: list[str]) -
 def verdict(command: str, m: dict, cwd: str | None = None, _depth: int = 0) -> tuple[str, str]:
     cwd = os.path.realpath(cwd or os.getcwd())
     deny = [h for h in (m.get("deny_hosts") or []) if isinstance(h, str)]
+    command = PY_HEREDOC.sub(lambda mt: "true" if _py_safe(mt.group(3), m, cwd) else mt.group(0), command)
     if PIPE_TO_SHELL.search(command):
         return "block", "piping a download into a shell"
     try:
