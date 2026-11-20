@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""toolchain: download, list, load and remove JDKs, Node.js, Maven, Gradle, Go, Rust (cargo) and the Android SDK.
+
+  toolchain tools                                       the tools it knows and where each one lives
+  toolchain TOOL available [ARGS]                       versions you can install (jdk: also the distributions)
+  toolchain TOOL install ARGS [--where home|project|FOLDER] [--force] [--no-ignore]
+                                                        jdk: DISTRO VERSION, the rest: VERSION (see `tools`)
+                                                        --project = --where project: inside the repo, added to .gitignore
+  toolchain TOOL list [--where ...]                     what is installed (home and the repo's folder when --where is not given)
+  toolchain TOOL env NAME [--shell sh|fish|powershell]  lines that load it: eval "$(toolchain jdk env temurin-21.0.13.1)"
+  toolchain TOOL env --unload [NAME]                    lines that unload it again
+  toolchain TOOL run NAME -- COMMAND...                 run one command with that tool first in PATH (and JAVA_HOME, GOROOT, ...)
+  toolchain TOOL remove NAME [--where ...] --yes        delete an installed version
+  toolchain android sdk PACKAGE...                      sdkmanager on the installed SDK (the licenses are accepted by the user, never here)
+
+Folders: jdk -> ~/.jdks, everything else -> ~/.toolchains/<tool>; with --project <repo>/.jdks or <repo>/.toolchains/<tool>.
+Linux and macOS (x64 and arm64). Windows is not supported.
+"""
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import toolchain as tc  # noqa: E402
+from providers import PROVIDERS  # noqa: E402
+
+
+def bases(p, where):
+    if where:
+        return [(where, p.base(where))]
+    out = [("home", p.base("home"))]
+    root = tc.repo_root()
+    if root and (root / p.top).is_dir():
+        out.append(("project", root / p.top))
+    return out
+
+
+def split(argv):
+    """(where, explicit, rest) with --where/--project removed."""
+    explicit = "--where" in argv or "--project" in argv
+    where, rest = tc.parse_where(argv)
+    return where, explicit, rest
+
+
+def cmd_tools(_):
+    for name, p in PROVIDERS.items():
+        print(f"{name:<8} ~/{p.top:<22} toolchain {name} install {p.usage}")
+
+
+def cmd_available(p, argv):
+    print("\n".join(p.available([a for a in argv if not a.startswith("--")])))
+
+
+def cmd_install(p, argv):
+    where, _, rest = split(argv)
+    force, no_ignore = "--force" in rest, "--no-ignore" in rest
+    args = [a for a in rest if not a.startswith("--")]
+    rel = p.resolve(args)
+    base = p.base(where)
+    target = base / tc.valid_name("name", rel["name"])
+    print(f"{p.name} {rel['version']}" + (f" ({tc.fmt_size(rel['size'])})" if rel.get("size") else "") + f" -> {target}")
+    if target.exists() and not force:
+        print(f"already installed: {target}")
+        return
+    base.mkdir(parents=True, exist_ok=True)
+    note = tc.ensure_ignored(p.ignore_entry()) if where == "project" and not no_ignore else ""
+    import shutil
+    import tempfile
+    with tempfile.TemporaryDirectory(dir=base, prefix=".dl-") as tmp:
+        if target.exists():
+            shutil.rmtree(target)
+        p.install(rel, target, Path(tmp))
+    if note:
+        print(note)
+    print(f"installed {rel['name']}")
+    print(f"load it:  eval \"$(toolchain {p.name} env {rel['name']})\"   or   toolchain {p.name} run {rel['name']} -- <command>")
+
+
+def cmd_list(p, argv):
+    where, explicit, _ = split(argv)
+    found = tc.installed(bases(p, where if explicit else None), p.marker)
+    if not found:
+        print(f"no {p.name} installed with toolchain (install one: toolchain {p.name} install {p.usage.split('   ')[0]})")
+    for x in found:
+        print(f"{x['name']:<30} {x['where']:<8} {x['path']}")
+
+
+def cmd_env(p, argv):
+    where, explicit, rest = split(argv)
+    shell = "sh"
+    if "--shell" in rest:
+        i = rest.index("--shell")
+        shell = rest[i + 1] if i + 1 < len(rest) else "sh"
+        rest = rest[:i] + rest[i + 2:]
+        if shell not in ("sh", "fish", "powershell"):
+            tc.die("--shell: sh, fish or powershell")
+    names = [a for a in rest if not a.startswith("--")]
+    if "--unload" in rest:
+        if not names:
+            tc.die(f"usage: toolchain {p.name} env --unload NAME")
+        vars_, dirs = p.env(tc.resolve_installed(names[0], bases(p, where if explicit else None), p.marker))
+        print(tc.shell_unload(vars_, dirs))
+        return
+    if len(names) != 1:
+        tc.die(f"usage: toolchain {p.name} env NAME [--shell sh|fish|powershell] | env --unload NAME")
+    vars_, dirs = p.env(tc.resolve_installed(names[0], bases(p, where if explicit else None), p.marker))
+    print(tc.shell_env(vars_, dirs, shell))
+
+
+def cmd_run(p, argv):
+    if "--" not in argv:
+        tc.die(f"usage: toolchain {p.name} run NAME -- COMMAND...")
+    i = argv.index("--")
+    where, explicit, head = split(argv[:i])
+    if len(head) != 1:
+        tc.die(f"usage: toolchain {p.name} run NAME -- COMMAND...")
+    vars_, dirs = p.env(tc.resolve_installed(head[0], bases(p, where if explicit else None), p.marker))
+    tc.run_with(vars_, dirs, argv[i + 1:])
+
+
+def cmd_remove(p, argv):
+    where, explicit, rest = split(argv)
+    names = [a for a in rest if not a.startswith("--")]
+    if len(names) != 1:
+        tc.die(f"usage: toolchain {p.name} remove NAME [--where ...] --yes")
+    spec = tc.valid_name("name", names[0])
+    matches = [x for x in tc.installed(bases(p, where if explicit else None), p.marker) if x["name"] == spec]
+    if not matches:
+        tc.die(f"no installed {p.name} named '{spec}' (see: toolchain {p.name} list)")
+    if len(matches) > 1:
+        tc.die(f"'{spec}' exists in several folders: " + ", ".join(m["where"] for m in matches) + "; pass --where")
+    base = p.base(matches[0]["where"])
+    top = base / spec
+    if not top.is_dir():
+        tc.die(f"{top} is not a folder managed here")
+    print(f"will delete {top}")
+    if "--yes" not in rest:
+        print("Nothing deleted. Confirm with the user, then run it again with --yes.")
+        sys.exit(1)
+    import shutil
+    shutil.rmtree(top)
+    print(f"removed {spec}")
+
+
+def cmd_sdk(p, argv):
+    """sdkmanager on the installed Android SDK. Licenses are never accepted here: stdin is closed, so sdkmanager stops and says so."""
+    where, explicit, rest = split(argv)
+    home = tc.resolve_installed("android-sdk", bases(p, where if explicit else None), p.marker)
+    packages = [a for a in rest if not a.startswith("--")]
+    if not packages:
+        tc.die("usage: toolchain android sdk PACKAGE...   e.g. 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'")
+    vars_, dirs = p.env(home)
+    sdkmanager = home / "cmdline-tools" / "latest" / "bin" / "sdkmanager"
+    r = subprocess.run([str(sdkmanager), f"--sdk_root={home}", *packages], env=tc.env_for_run(vars_, dirs), stdin=subprocess.DEVNULL)
+    if r.returncode != 0:
+        print(f"sdkmanager failed. If it asks for licenses, the user must accept them: ! {sdkmanager} --sdk_root={home} --licenses", file=sys.stderr)
+    sys.exit(r.returncode)
+
+
+ACTIONS = {"available": cmd_available, "install": cmd_install, "list": cmd_list, "env": cmd_env, "run": cmd_run, "remove": cmd_remove}
+
+
+def main(argv):
+    if argv[:1] == ["tools"]:
+        cmd_tools(argv[1:])
+        return 0
+    if len(argv) < 2 or argv[0] not in PROVIDERS or (argv[1] not in ACTIONS and not (argv[0] == "android" and argv[1] == "sdk")):
+        print(__doc__)
+        return 2
+    p = PROVIDERS[argv[0]]
+    try:
+        (cmd_sdk if argv[1] == "sdk" else ACTIONS[argv[1]])(p, argv[2:])
+    except tc.ToolError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
