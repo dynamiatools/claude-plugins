@@ -72,7 +72,7 @@ These read `workspace.toml`. Without one the tool answers `no .dynamia/workspace
 | `/dynamia:http` | API checks with assertions, and local mock servers for third-party APIs | Test endpoints and integrations without the real service. Smoke checks before shipping need a workspace |
 | `/dynamia:git-status` | Compact status card of the current repo | A quick, read-only look at where things stand |
 | `/dynamia:sys` | Machine load, disk, memory, ports and leftover processes | Find who holds a port or what was left running |
-| `/dynamia:tmux-session` | Starts a tmux session with Claude Code and Remote Control in a project | Work from another device |
+| `/dynamia:tmux-session` | Starts a tmux session with Claude Code and Remote Control in a project, and shows how the sessions are doing (`ms-workspace tmux ls`, `thanos sessions`) | Work from another device; `/dynamia:thanos --background` runs a mission in one |
 | `/dynamia:code-tunnel` | Opens a Cloudflare tunnel to the remote code viewer for the current repo | Share a read-only view of the code |
 | `/dynamia:powers-installers` | Installs, checks and removes agent helpers (uv, rtk, codebase-memory, graphify, headroom); shows the plan first | One reviewed script instead of ad-hoc installs |
 

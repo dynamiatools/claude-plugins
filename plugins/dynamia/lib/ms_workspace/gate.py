@@ -27,6 +27,11 @@ SECRET_PATTERNS = [
     ("credentials-in-url", re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s/:@\"']{2,}:[^\s/@\"']{4,}@[^\s/\"']+", re.I)),
 ]
 ASSIGNMENT = re.compile(r"""(?i)\b([\w.-]*(?:passw(?:or)?d|passwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|token|private[_-]?key)[\w.-]*)\s*[:=]\s*(["'])([^"'\s]{8,})\2""")
+# Heuristics (not token formats) are the ones that raise false alarms, so they skip what is not a secret:
+SQL_BEFORE = re.compile(r"(?i)\b(select|insert|update|delete|where|from|set|values|identified|alter|create|grant|join)\b[^\n]*$")
+NAME_SUFFIX = re.compile(r"(?i)(column|field|name|header|label|type|path|prefix|suffix|storage|param|attr|attribute|prop|property|alias|var|env)$")
+LOCAL_HOST = re.compile(r"(?i)@(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1\]|host\.docker\.internal|[\w.-]*\.(local|localhost|test|example|invalid))(?=[:/\s\"']|$)")
+DEV_FILE = re.compile(r"(?i)(^|/)(docker-compose[^/]*\.ya?ml|compose[^/]*\.ya?ml|\.env\.(example|sample|dist|template)|[^/]*\.(example|sample|dist|template))$|(^|/)(src/test|testdata|fixtures?|seeds?)/")
 JS, JVM, PY = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue", ".svelte"), (".java", ".kt", ".kts", ".groovy", ".scala"), (".py",)
 # (rule, pattern, file extensions, noisy in test files). Rules only apply to the language they belong to.
 DEBUG = [
@@ -59,13 +64,15 @@ def scan_line(line: str, path: str) -> list[tuple[str, str, str]]:
     found = []
     for rule, rx in SECRET_PATTERNS:
         m = rx.search(line)
-        if m and not (rule == "credentials-in-url" and PLACEHOLDER.search(m.group(0))):
+        if m and not (rule == "credentials-in-url" and (PLACEHOLDER.search(m.group(0)) or LOCAL_HOST.search(m.group(0)))):
             found.append(("block", rule, hide(m.group(0)) if rule != "private-key" else "-----BEGIN ... PRIVATE KEY-----"))
     m = ASSIGNMENT.search(line)
-    if m and not found:
+    if m and not found and not (SQL_BEFORE.search(line[:m.start()]) or NAME_SUFFIX.search(m.group(1)) or TEST_PATH.search(path) or DEV_FILE.search(path)):
         value = m.group(3)
         secretish = any(c.isdigit() for c in value) or (any(c.isupper() for c in value) and any(c.islower() for c in value))
-        if (secretish and not PLACEHOLDER.search(value) and not PLACEHOLDER.search(m.group(1))
+        words = [w for w in re.split(r"[_.\-/ ]", value) if w]
+        identifier = len(words) > 1 and all(w.islower() and w.isalpha() or re.fullmatch(r"v?\d{1,2}", w) for w in words)   # auth_token_v2_store
+        if (secretish and not identifier and not PLACEHOLDER.search(value) and not PLACEHOLDER.search(m.group(1))
                 and (entropy(value) >= 3.0 or len(value) >= 20 and not value.isalpha())):   # words with separators (json:access_token) are not secrets
             found.append(("block", "hardcoded-secret", f"{m.group(1)} = {hide(value)}"))
     for rule, rx, exts, noisy_in_tests in DEBUG:

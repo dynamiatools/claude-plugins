@@ -43,12 +43,42 @@ DANGEROUS_ENV = re.compile(r"^(GH_BROWSER|GH_PAGER|GH_EDITOR|BROWSER|PAGER|GIT_P
 GH_READ = {"issue": {"view", "list", "status"}, "pr": {"view", "list", "checks", "diff", "status"}, "repo": {"view"},
            "run": {"view", "list"}, "release": {"view", "list"}}
 MS_SAFE = {"status", "log", "usage", "plan", "test", "integrate", "affected", "context", "memory", "recall", "doctor", "gate", "budget",
-           "insights", "tokens", "thanos", "handoff", "modules", "junit", "sys", "images", "claude-md", "open", "contract"}
+           "insights", "tokens", "thanos", "tmux", "handoff", "modules", "junit", "sys", "images", "claude-md", "open", "contract"}
 MS_BLOCK = {"ship", "merge", "clean", "undo", "promote", "setup-hooks", "notify", "batch", "branch", "release"}
 CURL_WRITE = re.compile(r"(^|\s)(-X\s*(POST|PUT|DELETE|PATCH)|--request\s+(POST|PUT|DELETE|PATCH)|-d\b|--data\S*|-F\b|--form\b|-T\b|--upload-file|--json\b)", re.I)
 PIPE_TO_SHELL = re.compile(r"\|\s*(sudo\s+)?(ba|z|da|k)?sh\b")
 SQL_DESTROY = re.compile(r"\b(drop|truncate)\s+(table|database|schema|user)\b|\bdelete\s+from\s+\S+\s*(;|\"|'|$)", re.I)
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+# Shell syntax and harmless builtins that only shape a command: a `for ... do ... done` around safe commands is as safe as they are.
+SUBST = r"\$\(((?:[^()`$]|\$(?!\())*)\)"   # a plain command substitution: no nesting, no backticks
+SHELL_LEAD = {"do", "then", "else", "elif", "if", "while", "until", "!", "time"}
+SHELL_BARE = {"done", "fi", "esac", ":", "export", "unset", "set", "local", "readonly", "declare"}
+LOCAL_URL = re.compile(r"^(https?://)?(localhost|127(\.\d+){3}|\[::1\]|0\.0\.0\.0)(:\d+)?([/?#$]\S*)?$", re.I)
+REMOTE_URL = re.compile(r"^https?://|^[\w-]+(\.[\w-]+)+(:\d+)?(/\S*)?$", re.I)
+
+
+# A `python3 - <<EOF` script that edits files is the usual way to patch a file. It is approved only when its text shows nothing that
+# leaves the batch: no network, no subprocess, no delete or move, no eval, only a few harmless imports and no path outside the batch.
+PY_HEREDOC = re.compile(r"(?:^|(?<=[;&|\n]))[ \t]*python3?[ \t]+-?[ \t]*<<-?[ \t]*(['\"]?)(\w+)\1[ \t]*\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
+PY_IMPORT_OK = {"re", "json", "sys", "pathlib", "textwrap", "io", "string", "collections", "itertools", "difflib", "csv", "math", "datetime"}
+PY_BAD = re.compile(r"\b(subprocess|socket|urllib|requests|http|ftplib|smtplib|shutil|ctypes|importlib|pickle|marshal|eval|exec|__import__|"
+                    r"getattr|setattr|globals|locals|input|breakpoint)\b|\bos\s*\.\s*(?!path\b)\w+|\.(unlink|rmdir|rmtree|rename|chmod|chown|symlink_to|"
+                    r"hardlink_to|touch|mkdir|rmdir)\s*\(|\bsys\s*\.\s*(modules|path)")
+
+
+def _py_safe(body: str, m: dict, cwd: str) -> bool:
+    for mt in re.finditer(r"^\s*(?:from\s+(\w+)|import\s+([\w., ]+))", body, re.M):
+        mods = [mt.group(1)] if mt.group(1) else [x.strip().split(" as ")[0].split(".")[0] for x in mt.group(2).split(",")]
+        if any(x not in PY_IMPORT_OK for x in mods):
+            return False
+    if PY_BAD.search(body):
+        return False
+    for lit in re.findall(r"""(?<![\w])[rbfu]{0,2}(?:'([^'\n]*)'|"([^"\n]*)")""", body):
+        text = lit[0] or lit[1]
+        if text.startswith(("/", "~")) or text == ".." or text.startswith("../") or "/../" in text:
+            if not inside(text, m, cwd):
+                return False
+    return True
 
 
 def _roots(m: dict) -> list[str]:
@@ -295,6 +325,10 @@ def _ms(words: list[str], args: list[str], m: dict | None = None) -> tuple[str, 
     sub = words[0] if words else ""
     if sub in MS_BLOCK:
         return "block", f"ms-workspace {sub} is for the user, not for a THANOS mission"
+    if sub == "thanos" and words[1:2] == ["launch"]:
+        return "block", "a THANOS mission does not launch other missions"
+    if sub == "tmux" and words[1:2] == ["send"]:
+        return "block", "ms-workspace tmux send types into another session: that is for the user"
     if sub == "env" and "--trust" in args:
         return "block", "ms-workspace env --trust"
     if sub == "ps" and words[1:2] == ["kill"]:
@@ -338,8 +372,12 @@ def _classify(seg: list[str], m: dict, cwd: str, moved: bool, deny: list[str]) -
     if raw and os.path.basename(raw[0]) in NEVER:
         return "block", f"{os.path.basename(raw[0])}: no privilege escalation", cwd, moved
     seg = _strip(seg)
-    if not seg:
+    while seg and seg[0] in SHELL_LEAD:
+        seg = seg[1:]
+    if not seg or seg[0] in SHELL_BARE and not any(DANGEROUS_ENV.match(t) for t in seg[1:]):
         return "safe", "", cwd, moved
+    if seg[0] in ("for", "select"):
+        return "safe", "", cwd, moved   # `for x in words`: it only names the words; the body is classified on its own
     prog, args = os.path.basename(seg[0]), seg[1:]
     words = [a for a in args if not a.startswith("-")]
     text = " ".join(seg)
@@ -412,7 +450,15 @@ def _classify(seg: list[str], m: dict, cwd: str, moved: bool, deny: list[str]) -
     if prog in ("curl", "wget"):
         if CURL_WRITE.search(text):
             return "block", f"{prog} that sends data", cwd, moved
+        # shortcut: `$` is allowed after the port so `http://localhost:3100$path` works; revisit if a variable could carry a host.
+        urls = [a for a in args if not a.startswith("-") and (LOCAL_URL.match(a) or REMOTE_URL.match(a))]
+        outputs = [args[i + 1] for i, a in enumerate(args[:-1]) if a in ("-o", "--output")]
+        if prog == "curl" and urls and all(LOCAL_URL.match(u) for u in urls) and all(o == "/dev/null" for o in outputs) \
+                and not any(a in ("-O", "--remote-name", "-K", "--config") for a in args):
+            return "safe", "", cwd, moved   # a read-only GET of this machine's own server, nothing saved
         return "unknown", "", cwd, moved
+    if prog == "openssl" and words[:1] in (["rand"], ["version"], ["dgst"]):
+        return "safe", "", cwd, moved   # random bytes or a digest on stdout: used for throwaway local keys
     if prog in ("mysql", "mariadb", "mysqldump", "mysqladmin", "psql", "pg_dump", "mongo", "mongosh", "redis-cli"):
         host = ""
         for i, a in enumerate(args):
@@ -437,13 +483,17 @@ def _classify(seg: list[str], m: dict, cwd: str, moved: bool, deny: list[str]) -
 def verdict(command: str, m: dict, cwd: str | None = None, _depth: int = 0) -> tuple[str, str]:
     cwd = os.path.realpath(cwd or os.getcwd())
     deny = [h for h in (m.get("deny_hosts") or []) if isinstance(h, str)]
+    command = PY_HEREDOC.sub(lambda mt: "true" if _py_safe(mt.group(3), m, cwd) else mt.group(0), command)
     if PIPE_TO_SHELL.search(command):
         return "block", "piping a download into a shell"
     try:
         segs = _segments(re.sub(r"\d*>&\d+", " ", command).replace("&>>", ">>").replace("&>", ">"))
     except ValueError:
         return "", ""
-    opaque = "$(" in command or "`" in command or "<(" in command or _depth > 2
+    subs = re.findall(SUBST, command)   # a plain `$(cmd)` is safe when cmd is; anything nested or backtick stays opaque
+    rest = re.sub(SUBST, "", command)
+    opaque = "$(" in rest or "`" in command or "<(" in command or _depth > 2 \
+        or any(verdict(x, m, cwd=cwd, _depth=_depth + 1)[0] != "allow" for x in subs)
     kinds, moved = [], False
     for seg in segs:
         kind, why, cwd, moved = _classify(seg, m, cwd, moved, deny)

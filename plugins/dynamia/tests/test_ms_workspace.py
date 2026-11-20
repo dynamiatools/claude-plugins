@@ -3949,6 +3949,18 @@ class TestGate(Base):
         out = self.gate().stdout
         self.assertNotIn("c.py", out)
 
+    def test_sql_text_column_names_and_local_dev_urls_are_not_secrets(self):
+        pw = fake("Zx9", "kQ7vLm2p")
+        self.add({"Repo.java": f'String sql = "UPDATE users SET password = \'{pw}\' WHERE id = 1";\nstatic final String PASSWORD_COLUMN = "{pw}";\n',
+                  "app.properties": f"url=jdbc:mysql://root:{pw}@localhost:3306/shop\n",
+                  "docker-compose.yml": f'  MYSQL_ROOT_PASSWORD: "{pw}"\n',
+                  "ui.ts": 'const KEY_TOKEN_STORAGE = "auth_token_v2_store";\n'})
+        r = self.gate()
+        self.assertOk(r)
+        self.assertIn("gate: clean", r.stdout)
+        self.add({"prod.properties": f"url=jdbc:mysql://root:{pw}@db.internal.corp:3306/shop\n"}, "remote")
+        self.assertIn("credentials-in-url", self.gate().stdout)
+
     def test_only_added_lines_are_scanned_and_allow_markers_work(self):
         old = fake("AKIA", "ABCDEFGHIJKLMNOP")
         self.ws.commit(self.ws.root / "lib", "old secret on the base branch", {"legacy.txt": f"key = {old}\nother = 1\n"})
@@ -5105,7 +5117,229 @@ esac
         self.assertEqual(thanos_guard._ms(["merge", "b1"], ["merge", "b1"])[0], "block")
 
 
+# ----------------------------------------------------------- tmux and THANOS launch
+FAKE_TMUX = r"""#!/usr/bin/env python3
+import os, sys
+d = os.environ["FAKE_TMUX_DIR"]
+a = sys.argv[1:]
+open(os.path.join(d, "calls.log"), "a").write(" ".join(a) + "\n")
+def name(t): return t.lstrip("=").rstrip(":")
+def path(n): return os.path.join(d, "s_" + n)
+cmd = a[0] if a else ""
+if cmd == "has-session":
+    sys.exit(0 if os.path.exists(path(name(a[a.index("-t") + 1]))) else 1)
+if cmd == "new-session":
+    n = a[a.index("-s") + 1]
+    open(path(n), "w").write(os.environ.get("FAKE_SCREEN", "❯ \n"))
+    open(os.path.join(d, "dir_" + n), "w").write(a[a.index("-c") + 1])
+elif cmd == "list-sessions":
+    names = sorted(f[2:] for f in os.listdir(d) if f.startswith("s_"))
+    if not names: sys.exit(1)
+    for n in names: print(f"{n}\t1\t0\t" + open(os.path.join(d, "dir_" + n)).read())
+elif cmd == "capture-pane":
+    n = name(a[a.index("-t") + 1])
+    if not os.path.exists(path(n)): sys.exit(1)
+    sys.stdout.write(open(path(n)).read())
+elif cmd == "kill-session":
+    os.remove(path(name(a[a.index("-t") + 1])))
+"""
+
+
+class TestThanosWithoutWorkspace(unittest.TestCase):
+    """No workspace.toml: the mission opens its worktrees under ~/.dynamia/thanos/working-trees and still works."""
+
+    def setUp(self):
+        self.ws = WS(repos=("lib",), toml=None)
+        self.addCleanup(self.ws.close)
+        self.repo = self.ws.project / "lib"
+        self.base = self.ws.home / ".dynamia" / "thanos"
+        self.bin = self.ws.tmp / "tbin"
+        self.bin.mkdir()
+        self.state = self.ws.tmp / "tmuxstate"
+        self.state.mkdir()
+        (self.bin / "tmux").write_text(FAKE_TMUX)
+        (self.bin / "claude").write_text("#!/bin/sh\nexit 0\n")
+        for f in ("tmux", "claude"):
+            (self.bin / f).chmod(0o755)
+        self.env = {"PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_TMUX_DIR": str(self.state)}
+
+    def ms(self, *args, cwd=None):
+        return self.ws.ms(*args, cwd=cwd or self.repo, env=self.env)
+
+    def test_new_registers_the_repo_and_opens_the_worktree_under_the_home_folder(self):
+        r = self.ms("thanos", "new", "demo")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        wt = self.base / "working-trees" / "thanos-demo" / "lib"
+        self.assertTrue((wt / ".git").exists())
+        self.assertEqual(self.ws.git(wt, "branch", "--show-current"), "feat/thanos-demo")
+        reg = json.loads((self.base / "repos.json").read_text())
+        self.assertEqual(reg["lib"]["path"], str(self.repo.resolve()))
+        self.assertEqual(reg["lib"]["base"], "next")
+        again = self.ms("thanos", "new", "demo")
+        self.assertEqual(again.returncode, 1)
+        self.assertIn("already exists", again.stdout + again.stderr)
+
+    def test_a_second_repo_with_the_same_name_is_refused(self):
+        self.assertEqual(self.ms("thanos", "new", "a").returncode, 0)
+        other = self.ws.tmp / "other" / "lib"
+        other.mkdir(parents=True)
+        self.ws.git(other, "init", "-q")
+        self.ws.commit(other, "init", {"x": "1"})
+        r = self.ws.ms("thanos", "new", "b", str(other), cwd=other, env=self.env)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("already registered", r.stdout + r.stderr)
+
+    def test_start_status_and_launch_work_from_the_home_folder(self):
+        self.assertEqual(self.ms("thanos", "new", "demo").returncode, 0)
+        wt = self.base / "working-trees" / "thanos-demo" / "lib"
+        (self.base / "working-trees" / "thanos-demo" / "THANOS.md").write_text("# THANOS\n\n## Tasks\n- [ ] [S] one: do it\n")
+        r = self.ms("thanos", "start", "thanos-demo", "--goal", "g", "--max-steps", "5", cwd=wt)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("step 0/5", self.ms("thanos", "status", cwd=wt).stdout)
+        self.assertEqual(self.ms("thanos", "stop", cwd=wt).returncode, 0)
+        r = self.ms("thanos", "launch", "thanos-demo", "--goal", "g", "--no-remote", "--yes")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual((self.state / "dir_thanos-demo").read_text(), str(wt))
+        self.assertIn("thanos-demo  [", self.ms("thanos", "sessions").stdout)
+
+    def test_the_launch_prompt_still_appears_without_a_workspace(self):
+        r = self.ws.ms("guard", cwd=self.repo, env=self.env,
+                       input=json.dumps({"tool_name": "Bash", "session_id": "s", "cwd": str(self.repo),
+                                         "tool_input": {"command": "ms-workspace thanos launch thanos-x --yes"}}))
+        self.assertEqual(json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"], "ask")
+
+
+class TestTmuxAndLaunch(Base):
+    def setUp(self):
+        super().setUp()
+        self.bin = self.ws.tmp / "tbin"
+        self.bin.mkdir()
+        self.state = self.ws.tmp / "tmuxstate"
+        self.state.mkdir()
+        (self.bin / "tmux").write_text(FAKE_TMUX)
+        (self.bin / "claude").write_text("#!/bin/sh\nexit 0\n")
+        for f in ("tmux", "claude"):
+            (self.bin / f).chmod(0o755)
+        self.env = {"PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_TMUX_DIR": str(self.state)}
+
+    def ms(self, *args):
+        return self.ws.ms(*args, env=self.env)
+
+    def screen(self, name, text):
+        (self.state / f"s_{name}").write_text(text)
+        (self.state / f"dir_{name}").write_text("/w")
+
+    def test_ls_guesses_the_state_from_the_screen_and_masks_secrets(self):
+        self.screen("a", "working...\n  esc to interrupt\n")
+        self.screen("b", "Do you want to proceed?\n❯ 1. Yes\n  2. No\n")
+        self.screen("c", "done\n╭────╮\n│ ❯  │\n╰────╯\n")
+        self.screen("d", "[claude exited: press Enter to close]")
+        out = self.ms("tmux", "ls").stdout
+        for name, state in (("a", "working"), ("b", "needs-you"), ("c", "idle"), ("d", "exited")):
+            self.assertRegex(out, rf"(?m)^{name}\s+{state}\b")
+        self.screen("e", "token = " + fake("ghp_", "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8") + "\n")
+        shown = self.ms("tmux", "status", "e").stdout
+        self.assertIn("***", shown)
+        self.assertNotIn("a1B2c3D4", shown)
+        self.assertEqual(self.ms("tmux", "status", "missing").returncode, 1)
+
+    def test_send_types_only_into_an_idle_session(self):
+        self.screen("a", "working\n esc to interrupt\n")
+        r = self.ms("tmux", "send", "a", "hello")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not idle", r.stdout + r.stderr)
+        self.screen("a", "│ ❯ │\n")
+        self.assertOk(self.ms("tmux", "send", "a", "hello", "there"))
+        calls = (self.state / "calls.log").read_text()
+        self.assertIn("send-keys -t =a: -l hello there", calls)
+        self.assertIn("send-keys -t =a: Enter", calls)
+
+    def test_launch_needs_yes_and_starts_one_session_in_the_worktree(self):
+        d = self.ws.batch("thanos-x", "lib")
+        r = self.ms("thanos", "launch", "thanos-x", "--goal", "do it")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("Nothing started", r.stdout)
+        self.assertFalse((self.state / "s_thanos-x").exists())
+        r = self.ms("thanos", "launch", "thanos-x", "--goal", "do it", "--max-steps", "12", "--no-remote", "--yes")
+        self.assertOk(r)
+        self.assertTrue((self.state / "s_thanos-x").exists())
+        self.assertEqual((self.state / "dir_thanos-x").read_text(), str(d / "lib"))
+        calls = (self.state / "calls.log").read_text()
+        self.assertIn("/dynamia:thanos --from-brief", calls)
+        self.assertIn("--max-steps 12", calls)
+        self.assertIn("-e PATH=", calls)
+        self.ws.batch("thanos-w", "lib")
+        self.assertOk(self.ws.ms("thanos", "launch", "thanos-w", "--goal", "g", "--no-remote", "--yes", env={**self.env, "THANOS_CLAUDE_ARGS": "--model sonnet"}))
+        self.assertIn("claude --model sonnet --name", (self.state / "calls.log").read_text())
+        self.assertIn("do it", (d / "THANOS-BRIEF.md").read_text())
+        again = self.ms("thanos", "launch", "thanos-x", "--no-remote", "--yes")
+        self.assertEqual(again.returncode, 1)
+        self.assertIn("already exists", again.stdout + again.stderr)
+
+    def test_launch_without_a_brief_or_a_batch_fails_and_a_mission_cannot_launch_one(self):
+        self.ws.batch("thanos-y", "lib")
+        r = self.ms("thanos", "launch", "thanos-y", "--yes", "--no-remote")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no brief", r.stdout + r.stderr)
+        sys.path.insert(0, str(REPO / "lib"))
+        self.assertEqual(self.ms("thanos", "launch", "nope", "--goal", "g", "--yes").returncode, 1)
+        from ms_workspace import guard
+        self.assertTrue(guard.confirm_reasons(self.ws.root, "ms-workspace thanos launch b --yes"), "the prompt is a second confirmation")
+        self.assertEqual(guard.confirm_reasons(self.ws.root, "ms-workspace thanos launch b"), [])
+        sys.path.insert(0, str(REPO / "lib"))
+        from ms_workspace import thanos_guard
+        m = {"batch_path": "/tmp/claude-1000/b", "deny_hosts": []}
+        self.assertEqual(thanos_guard.verdict("ms-workspace thanos launch b --yes", m, cwd="/tmp/claude-1000/b")[0], "block")
+        self.assertEqual(thanos_guard.verdict("ms-workspace tmux send x hi", m, cwd="/tmp/claude-1000/b")[0], "block")
+        self.assertEqual(thanos_guard.verdict("ms-workspace tmux ls", m, cwd="/tmp/claude-1000/b")[0], "allow")
+
+    def test_sessions_lists_only_thanos_sessions_with_the_mission_and_flags_a_prompt(self):
+        self.ws.batch("thanos-z", "lib")
+        self.assertOk(self.ms("thanos", "launch", "thanos-z", "--goal", "g", "--no-remote", "--yes"))
+        self.screen("other", "❯ \n")
+        self.screen("thanos-z", "Do you want to proceed?\n❯ 1. Yes\n")
+        out = self.ms("thanos", "sessions", "--lines", "2").stdout
+        self.assertIn("thanos-z  [needs-you]", out)
+        self.assertIn("tmux attach -t thanos-z", out)
+        self.assertNotIn("other", out)
+        data = json.loads(self.ms("thanos", "sessions", "--json").stdout)
+        self.assertEqual([x["name"] for x in data], ["thanos-z"])
+        self.assertEqual(data[0]["batch"], "thanos-z")
+
+
 # --------------------------------------------------------------------- THANOS
+class TestThanosVerdict(unittest.TestCase):
+    """The strict profile approves a smoke test of the mission's own server without a prompt, and still stops the risky variants."""
+
+    def kind(self, command):
+        sys.path.insert(0, str(REPO / "lib"))
+        from ms_workspace import thanos_guard
+        batch = "/tmp/claude-1000/verdict/batch"
+        return thanos_guard.verdict(command, {"batch_path": batch, "deny_hosts": []}, cwd=batch)[0] or "ask"
+
+    def test_a_local_smoke_test_with_throwaway_keys_runs_without_a_prompt(self):
+        cmd = ("pnpm build 2>&1 | tail -3; export KEY=$(openssl rand -base64 32) PORT=3100; ms-workspace thanos run --name web -- node out.mjs 2>&1 | tail -2; sleep 5; "
+               "for u in /api/health /api/runs; do echo \"$u -> $(curl -s -o /dev/null -w '%{http_code}' http://localhost:3100$u)\"; done; "
+               "curl -s http://localhost:3100/api/health; ms-workspace thanos kill web 2>&1 | tail -1")
+        self.assertEqual(self.kind(cmd), "allow")
+
+    def test_a_python_heredoc_that_only_edits_files_in_the_batch_runs_without_a_prompt(self):
+        edit = "python3 - <<'EOF'\np='e2e/a.ts'\ns=open(p).read().replace('a','b')\nopen(p,'w').write(s)\nEOF"
+        self.assertEqual(self.kind(edit), "allow")
+        for body in ("import subprocess\nsubprocess.run(['ls'])", "import os\nos.system('ls')", "import urllib.request", "open('~/.ssh/id_rsa').read()"):
+            self.assertEqual(self.kind(f"python3 - <<'EOF'\n{body}\nEOF"), "ask", body)
+        self.assertEqual(self.kind("python3 - <<'EOF'\nopen('/etc/passwd').read()\nEOF"), "block")
+
+    def test_remote_saving_sending_and_nested_substitutions_are_not_approved(self):
+        self.assertEqual(self.kind("curl -s https://example.com/x"), "ask")
+        self.assertEqual(self.kind("curl -s -o out.bin http://localhost:3000/"), "ask")
+        self.assertEqual(self.kind("curl -s -X POST http://localhost:3000/"), "block")
+        self.assertEqual(self.kind("export PATH=/tmp/x:$PATH"), "block")
+        self.assertEqual(self.kind("echo $(rm -rf /tmp/zzz)"), "block")
+        self.assertEqual(self.kind("echo $(openssl enc -d -in x)"), "ask")
+        self.assertEqual(self.kind("echo `openssl rand -hex 4`"), "ask")
+
+
 class TestThanos(Base):
     SID = "sess-1"
 
@@ -5165,7 +5399,7 @@ class TestThanos(Base):
                     "git switch -c agent/b1/t", "ms-workspace http run smoke --env local", "ms-workspace thanos status"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.decision(self.bash(cmd, d / "lib")), "allow", cmd)
-        for cmd in ("python3 script.py", "ls $(pwd)", "npx something", "docker ps", "curl http://localhost:8080/health"):
+        for cmd in ("python3 script.py", "npx something", "docker ps", "curl https://example.com/health"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.decision(self.bash(cmd, d / "lib")), "none", "left to the normal permissions: " + cmd)
 

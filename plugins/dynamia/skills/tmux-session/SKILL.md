@@ -37,6 +37,13 @@ invoked by Claude, so this skill replaces it with `AskUserQuestion`).
 4. **Report** the session name and that it can be controlled from the Claude
    app (Remote Control) or attached with `tmux attach -t <session>`.
 
+## See the sessions and ask how they are doing
+Read-only, so it never disturbs what a session is doing:
+- `ms-workspace tmux ls` lists every tmux session with a guessed state: `working`, `idle`, `needs-you` (a permission prompt waits), `exited` or `unknown`. The state comes from the screen text, so treat it as a hint.
+- `ms-workspace tmux status <session> [--lines N]` shows the last lines of what a session shows (secrets on the screen are masked).
+- `ms-workspace thanos sessions` does the same for the missions started with `/dynamia:thanos --background`, with the mission summary (steps, tasks, Opus reviews).
+- `ms-workspace tmux send <session> <text>` types a line into a session, only when it is `idle` (`--force` overrides). Use it only when the user asks; to follow a mission read its state instead of asking it.
+
 ## Notes
 
 - Requires `tmux`, `claude` and `jq` in PATH.

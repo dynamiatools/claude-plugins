@@ -48,6 +48,7 @@ Usage:
   ms-workspace docker status|logs|stats|disk|health|ports|env|wait|clean   compact Docker views; only `clean --yes` changes anything
   ms-workspace sys [--tools] [--json]        OS, CPU, memory, disk, network in a few lines, with hints when something looks wrong
   ms-workspace ps [tree|find|ports|leftovers|kill]   processes: heavy ones, who holds a port, what was left running, guarded kill
+  ms-workspace tmux ls|status <session>|send <session> <text>   tmux sessions: guessed state, what one shows, a line typed into an idle one
   ms-workspace gate [batch] [--json]         scan what would be sent for secrets, merge markers, huge files and debug leftovers
   ms-workspace junit [paths] [--since MIN] [--top N]   summarize JUnit/Surefire/Gradle/vitest/pytest XML reports: failing tests, message, first project frame
   ms-workspace modules [deps|rdeps <m>|closure|check]   Maven reactor graph: dependents, exact -pl list for a change, cycles, [[arch.rule]] checks
@@ -128,6 +129,9 @@ def _dispatch(cmd: str, args: list[str]) -> int:
     if cmd == "junit":
         from .junit import cmd_junit
         return cmd_junit(Workspace.load(required=False), args)
+    if cmd == "tmux":
+        from .tmuxs import cmd_tmux
+        return cmd_tmux(Workspace.load(required=False), args)
     if cmd == "gate":
         from .gate import cmd_gate
         return cmd_gate(Workspace.load(required=False), args)
