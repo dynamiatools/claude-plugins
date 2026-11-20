@@ -3949,6 +3949,18 @@ class TestGate(Base):
         out = self.gate().stdout
         self.assertNotIn("c.py", out)
 
+    def test_sql_text_column_names_and_local_dev_urls_are_not_secrets(self):
+        pw = fake("Zx9", "kQ7vLm2p")
+        self.add({"Repo.java": f'String sql = "UPDATE users SET password = \'{pw}\' WHERE id = 1";\nstatic final String PASSWORD_COLUMN = "{pw}";\n',
+                  "app.properties": f"url=jdbc:mysql://root:{pw}@localhost:3306/shop\n",
+                  "docker-compose.yml": f'  MYSQL_ROOT_PASSWORD: "{pw}"\n',
+                  "ui.ts": 'const KEY_TOKEN_STORAGE = "auth_token_v2_store";\n'})
+        r = self.gate()
+        self.assertOk(r)
+        self.assertIn("gate: clean", r.stdout)
+        self.add({"prod.properties": f"url=jdbc:mysql://root:{pw}@db.internal.corp:3306/shop\n"}, "remote")
+        self.assertIn("credentials-in-url", self.gate().stdout)
+
     def test_only_added_lines_are_scanned_and_allow_markers_work(self):
         old = fake("AKIA", "ABCDEFGHIJKLMNOP")
         self.ws.commit(self.ws.root / "lib", "old secret on the base branch", {"legacy.txt": f"key = {old}\nother = 1\n"})
@@ -5106,6 +5118,31 @@ esac
 
 
 # --------------------------------------------------------------------- THANOS
+class TestThanosVerdict(unittest.TestCase):
+    """The strict profile approves a smoke test of the mission's own server without a prompt, and still stops the risky variants."""
+
+    def kind(self, command):
+        sys.path.insert(0, str(REPO / "lib"))
+        from ms_workspace import thanos_guard
+        batch = "/tmp/claude-1000/verdict/batch"
+        return thanos_guard.verdict(command, {"batch_path": batch, "deny_hosts": []}, cwd=batch)[0] or "ask"
+
+    def test_a_local_smoke_test_with_throwaway_keys_runs_without_a_prompt(self):
+        cmd = ("pnpm build 2>&1 | tail -3; export KEY=$(openssl rand -base64 32) PORT=3100; ms-workspace thanos run --name web -- node out.mjs 2>&1 | tail -2; sleep 5; "
+               "for u in /api/health /api/runs; do echo \"$u -> $(curl -s -o /dev/null -w '%{http_code}' http://localhost:3100$u)\"; done; "
+               "curl -s http://localhost:3100/api/health; ms-workspace thanos kill web 2>&1 | tail -1")
+        self.assertEqual(self.kind(cmd), "allow")
+
+    def test_remote_saving_sending_and_nested_substitutions_are_not_approved(self):
+        self.assertEqual(self.kind("curl -s https://example.com/x"), "ask")
+        self.assertEqual(self.kind("curl -s -o out.bin http://localhost:3000/"), "ask")
+        self.assertEqual(self.kind("curl -s -X POST http://localhost:3000/"), "block")
+        self.assertEqual(self.kind("export PATH=/tmp/x:$PATH"), "block")
+        self.assertEqual(self.kind("echo $(rm -rf /tmp/zzz)"), "block")
+        self.assertEqual(self.kind("echo $(openssl enc -d -in x)"), "ask")
+        self.assertEqual(self.kind("echo `openssl rand -hex 4`"), "ask")
+
+
 class TestThanos(Base):
     SID = "sess-1"
 
@@ -5165,7 +5202,7 @@ class TestThanos(Base):
                     "git switch -c agent/b1/t", "ms-workspace http run smoke --env local", "ms-workspace thanos status"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.decision(self.bash(cmd, d / "lib")), "allow", cmd)
-        for cmd in ("python3 script.py", "ls $(pwd)", "npx something", "docker ps", "curl http://localhost:8080/health"):
+        for cmd in ("python3 script.py", "npx something", "docker ps", "curl https://example.com/health"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.decision(self.bash(cmd, d / "lib")), "none", "left to the normal permissions: " + cmd)
 

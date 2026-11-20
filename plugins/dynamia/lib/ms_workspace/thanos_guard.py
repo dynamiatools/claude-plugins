@@ -49,6 +49,12 @@ CURL_WRITE = re.compile(r"(^|\s)(-X\s*(POST|PUT|DELETE|PATCH)|--request\s+(POST|
 PIPE_TO_SHELL = re.compile(r"\|\s*(sudo\s+)?(ba|z|da|k)?sh\b")
 SQL_DESTROY = re.compile(r"\b(drop|truncate)\s+(table|database|schema|user)\b|\bdelete\s+from\s+\S+\s*(;|\"|'|$)", re.I)
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+# Shell syntax and harmless builtins that only shape a command: a `for ... do ... done` around safe commands is as safe as they are.
+SUBST = r"\$\(((?:[^()`$]|\$(?!\())*)\)"   # a plain command substitution: no nesting, no backticks
+SHELL_LEAD = {"do", "then", "else", "elif", "if", "while", "until", "!", "time"}
+SHELL_BARE = {"done", "fi", "esac", ":", "export", "unset", "set", "local", "readonly", "declare"}
+LOCAL_URL = re.compile(r"^(https?://)?(localhost|127(\.\d+){3}|\[::1\]|0\.0\.0\.0)(:\d+)?([/?#$]\S*)?$", re.I)
+REMOTE_URL = re.compile(r"^https?://|^[\w-]+(\.[\w-]+)+(:\d+)?(/\S*)?$", re.I)
 
 
 def _roots(m: dict) -> list[str]:
@@ -338,8 +344,12 @@ def _classify(seg: list[str], m: dict, cwd: str, moved: bool, deny: list[str]) -
     if raw and os.path.basename(raw[0]) in NEVER:
         return "block", f"{os.path.basename(raw[0])}: no privilege escalation", cwd, moved
     seg = _strip(seg)
-    if not seg:
+    while seg and seg[0] in SHELL_LEAD:
+        seg = seg[1:]
+    if not seg or seg[0] in SHELL_BARE and not any(DANGEROUS_ENV.match(t) for t in seg[1:]):
         return "safe", "", cwd, moved
+    if seg[0] in ("for", "select"):
+        return "safe", "", cwd, moved   # `for x in words`: it only names the words; the body is classified on its own
     prog, args = os.path.basename(seg[0]), seg[1:]
     words = [a for a in args if not a.startswith("-")]
     text = " ".join(seg)
@@ -412,7 +422,15 @@ def _classify(seg: list[str], m: dict, cwd: str, moved: bool, deny: list[str]) -
     if prog in ("curl", "wget"):
         if CURL_WRITE.search(text):
             return "block", f"{prog} that sends data", cwd, moved
+        # shortcut: `$` is allowed after the port so `http://localhost:3100$path` works; revisit if a variable could carry a host.
+        urls = [a for a in args if not a.startswith("-") and (LOCAL_URL.match(a) or REMOTE_URL.match(a))]
+        outputs = [args[i + 1] for i, a in enumerate(args[:-1]) if a in ("-o", "--output")]
+        if prog == "curl" and urls and all(LOCAL_URL.match(u) for u in urls) and all(o == "/dev/null" for o in outputs) \
+                and not any(a in ("-O", "--remote-name", "-K", "--config") for a in args):
+            return "safe", "", cwd, moved   # a read-only GET of this machine's own server, nothing saved
         return "unknown", "", cwd, moved
+    if prog == "openssl" and words[:1] in (["rand"], ["version"], ["dgst"]):
+        return "safe", "", cwd, moved   # random bytes or a digest on stdout: used for throwaway local keys
     if prog in ("mysql", "mariadb", "mysqldump", "mysqladmin", "psql", "pg_dump", "mongo", "mongosh", "redis-cli"):
         host = ""
         for i, a in enumerate(args):
@@ -443,7 +461,10 @@ def verdict(command: str, m: dict, cwd: str | None = None, _depth: int = 0) -> t
         segs = _segments(re.sub(r"\d*>&\d+", " ", command).replace("&>>", ">>").replace("&>", ">"))
     except ValueError:
         return "", ""
-    opaque = "$(" in command or "`" in command or "<(" in command or _depth > 2
+    subs = re.findall(SUBST, command)   # a plain `$(cmd)` is safe when cmd is; anything nested or backtick stays opaque
+    rest = re.sub(SUBST, "", command)
+    opaque = "$(" in rest or "`" in command or "<(" in command or _depth > 2 \
+        or any(verdict(x, m, cwd=cwd, _depth=_depth + 1)[0] != "allow" for x in subs)
     kinds, moved = [], False
     for seg in segs:
         kind, why, cwd, moved = _classify(seg, m, cwd, moved, deny)
