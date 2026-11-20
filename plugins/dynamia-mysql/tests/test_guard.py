@@ -20,6 +20,13 @@ class GuardTest(unittest.TestCase):
         for c in ("ls -la", "git status", "rm -rf build", "systemctl restart nginx", "psql -c 'drop table x'", "npm test"):
             self.assertEqual(run(c), "allow", c)
 
+    def test_git_commit_messages_that_mention_mysql_are_text_not_commands(self):
+        msg = "git commit -m \"$(cat <<'EOF'\nfix(db): mysql seed\n\nset password = 'x' removed\nEOF\n)\""
+        self.assertEqual(run(msg), "allow")
+        self.assertEqual(run("git -C repo tag -a v1 -m 'mysql: identified by \"x\"'"), "allow")
+        # something chained after the message is still checked
+        self.assertEqual(run("git commit -m x && mysql -pSecret -e 'select 1'"), "deny")
+
     def test_reads_are_allowed(self):
         for c in ("mysql-tool query src \"SELECT 1\"", "mysql-tool replica-status rep", "mysql-tool inspect src",
                   "mysql -e 'SHOW REPLICA STATUS'", "mysqld --version", "git log --oneline -- mysql", "grep -r DROP mysql/"):

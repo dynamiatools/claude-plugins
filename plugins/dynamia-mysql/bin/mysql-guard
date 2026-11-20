@@ -113,6 +113,22 @@ def exempt(cmd):
     return bool(segs) and not REDIRECT.search(cmd) and all(x.split()[0] in EXEMPT_FIRST for x in segs)
 
 
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?\n\s*\2\b", re.S)
+GIT_TEXT = re.compile(r"^\s*git(?:\s+-C\s+\S+)?\s+(?:commit|tag|notes|merge|stash)\b")
+
+
+def git_text_only(cmd):
+    """A `git commit|tag|...` whose only MySQL mentions are text (a message, often a heredoc) is not a MySQL command.
+    Not exempt when anything is executed inside it: a `$(...)` other than the `$(cat <<EOF` message idiom, or backticks."""
+    if not GIT_TEXT.match(cmd):
+        return False
+    plain = HEREDOC.sub(" ", cmd)
+    plain = re.sub(r"\$\(\s*cat\s*\)", " ", plain)
+    if re.search(r"\$\(|`|&&|\|\||[;|]", re.sub(r"'[^']*'", "''", plain)):
+        return False
+    return True
+
+
 def read_only_tool(cmd):
     segs = segments(cmd)
     return bool(segs) and not REDIRECT.search(cmd) and all(SAFE_TOOL.match(x) for x in segs)
@@ -143,7 +159,7 @@ def check(tool, ti):
         return "deny", ["reading this plugin's secrets or temporary files (use the Read tool for profiles.toml)"]
     if CRED_FILES.search(cmd) and READERS.search(cmd):
         return "deny", ["reading a MySQL credentials file (ask the user to check it)"]
-    if not RELEVANT.search(cmd) or exempt(cmd):
+    if not RELEVANT.search(cmd) or exempt(cmd) or git_text_only(cmd):
         return None
     norm = re.sub(r"/\*.*?\*/", " ", cmd, flags=re.S)
     bare = re.sub(r"'[^']*'|\"[^\"]*\"", "''", norm)
