@@ -225,6 +225,45 @@ class Workspace:
             fh.close()
 
 
+class HomeWorkspace(Workspace):
+    """A THANOS mission with no workspace.toml: repos anywhere on disk, worktrees under ~/.dynamia/thanos/working-trees.
+
+    Repos are registered by `thanos new` in repos.json (name, path, base branch); an optional thanos.toml holds the [thanos] keys.
+    MS_THANOS_HOME moves the whole folder. Everything else of a workspace (test levels, integrate, ship) does not exist here."""
+
+    def __init__(self, root: Path | None = None):
+        self.root = self.project = Path(root or os.environ.get("MS_THANOS_HOME") or Path.home() / ".dynamia" / "thanos")
+        self.cfg_path = self.root / "thanos.toml"
+        self.registry = self.root / "repos.json"
+        self.state_dir = self.root / "state"
+        self.log_dir = self.state_dir / "logs"
+        self.batch_dir = self.root / "working-trees"
+        import tomllib
+        try:
+            self.cfg = tomllib.loads(self.cfg_path.read_text()) if self.cfg_path.is_file() else {}
+        except (OSError, tomllib.TOMLDecodeError) as e:
+            die(f"could not parse {self.cfg_path}: {e}")
+        try:
+            repos = json.loads(self.registry.read_text())
+        except (OSError, ValueError):
+            repos = {}
+        self.cfg["repos"] = repos if isinstance(repos, dict) else {}
+
+    def register(self, path: str | Path | None = None) -> str:
+        """Remember the repo that contains `path` (default: the current directory) and return its name."""
+        from .gate import default_base
+        top = toplevel(str(path) if path else None).resolve()
+        name = top.name
+        known = self.cfg["repos"].get(name)
+        if known and Path(known["path"]) != top:
+            die(f"a different repo named '{name}' is already registered ({known['path']}); rename the folder of one of them")
+        if not known:
+            self.cfg["repos"][name] = {"path": str(top), "base": default_base(top)}
+            self.root.mkdir(parents=True, exist_ok=True)
+            self.registry.write_text(json.dumps(self.cfg["repos"], indent=2))
+        return name
+
+
 # -------------------------------------------------------------------- batches
 def batch_of_cwd(ws: Workspace) -> str:
     """Name of the batch the current directory is inside, or ''."""

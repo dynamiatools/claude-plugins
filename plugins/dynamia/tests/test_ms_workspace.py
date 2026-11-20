@@ -5145,6 +5145,70 @@ elif cmd == "kill-session":
 """
 
 
+class TestThanosWithoutWorkspace(unittest.TestCase):
+    """No workspace.toml: the mission opens its worktrees under ~/.dynamia/thanos/working-trees and still works."""
+
+    def setUp(self):
+        self.ws = WS(repos=("lib",), toml=None)
+        self.addCleanup(self.ws.close)
+        self.repo = self.ws.project / "lib"
+        self.base = self.ws.home / ".dynamia" / "thanos"
+        self.bin = self.ws.tmp / "tbin"
+        self.bin.mkdir()
+        self.state = self.ws.tmp / "tmuxstate"
+        self.state.mkdir()
+        (self.bin / "tmux").write_text(FAKE_TMUX)
+        (self.bin / "claude").write_text("#!/bin/sh\nexit 0\n")
+        for f in ("tmux", "claude"):
+            (self.bin / f).chmod(0o755)
+        self.env = {"PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_TMUX_DIR": str(self.state)}
+
+    def ms(self, *args, cwd=None):
+        return self.ws.ms(*args, cwd=cwd or self.repo, env=self.env)
+
+    def test_new_registers_the_repo_and_opens_the_worktree_under_the_home_folder(self):
+        r = self.ms("thanos", "new", "demo")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        wt = self.base / "working-trees" / "thanos-demo" / "lib"
+        self.assertTrue((wt / ".git").exists())
+        self.assertEqual(self.ws.git(wt, "branch", "--show-current"), "feat/thanos-demo")
+        reg = json.loads((self.base / "repos.json").read_text())
+        self.assertEqual(reg["lib"]["path"], str(self.repo.resolve()))
+        self.assertEqual(reg["lib"]["base"], "next")
+        again = self.ms("thanos", "new", "demo")
+        self.assertEqual(again.returncode, 1)
+        self.assertIn("already exists", again.stdout + again.stderr)
+
+    def test_a_second_repo_with_the_same_name_is_refused(self):
+        self.assertEqual(self.ms("thanos", "new", "a").returncode, 0)
+        other = self.ws.tmp / "other" / "lib"
+        other.mkdir(parents=True)
+        self.ws.git(other, "init", "-q")
+        self.ws.commit(other, "init", {"x": "1"})
+        r = self.ws.ms("thanos", "new", "b", str(other), cwd=other, env=self.env)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("already registered", r.stdout + r.stderr)
+
+    def test_start_status_and_launch_work_from_the_home_folder(self):
+        self.assertEqual(self.ms("thanos", "new", "demo").returncode, 0)
+        wt = self.base / "working-trees" / "thanos-demo" / "lib"
+        (self.base / "working-trees" / "thanos-demo" / "THANOS.md").write_text("# THANOS\n\n## Tasks\n- [ ] [S] one: do it\n")
+        r = self.ms("thanos", "start", "thanos-demo", "--goal", "g", "--max-steps", "5", cwd=wt)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("step 0/5", self.ms("thanos", "status", cwd=wt).stdout)
+        self.assertEqual(self.ms("thanos", "stop", cwd=wt).returncode, 0)
+        r = self.ms("thanos", "launch", "thanos-demo", "--goal", "g", "--no-remote", "--yes")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual((self.state / "dir_thanos-demo").read_text(), str(wt))
+        self.assertIn("thanos-demo  [", self.ms("thanos", "sessions").stdout)
+
+    def test_the_launch_prompt_still_appears_without_a_workspace(self):
+        r = self.ws.ms("guard", cwd=self.repo, env=self.env,
+                       input=json.dumps({"tool_name": "Bash", "session_id": "s", "cwd": str(self.repo),
+                                         "tool_input": {"command": "ms-workspace thanos launch thanos-x --yes"}}))
+        self.assertEqual(json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"], "ask")
+
+
 class TestTmuxAndLaunch(Base):
     def setUp(self):
         super().setUp()
@@ -5203,6 +5267,10 @@ class TestTmuxAndLaunch(Base):
         calls = (self.state / "calls.log").read_text()
         self.assertIn("/dynamia:thanos --from-brief", calls)
         self.assertIn("--max-steps 12", calls)
+        self.assertIn("-e PATH=", calls)
+        self.ws.batch("thanos-w", "lib")
+        self.assertOk(self.ws.ms("thanos", "launch", "thanos-w", "--goal", "g", "--no-remote", "--yes", env={**self.env, "THANOS_CLAUDE_ARGS": "--model sonnet"}))
+        self.assertIn("claude --model sonnet --name", (self.state / "calls.log").read_text())
         self.assertIn("do it", (d / "THANOS-BRIEF.md").read_text())
         again = self.ms("thanos", "launch", "thanos-x", "--no-remote", "--yes")
         self.assertEqual(again.returncode, 1)

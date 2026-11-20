@@ -7,6 +7,8 @@
 so a launch is always confirmed by a person first. It starts `thanos-<batch>` in tmux inside the batch's first repo worktree, runs
 Claude Code there with `/dynamia:thanos --from-brief <brief>` and enables Remote Control. That session is a normal main session: it
 claims the mission, the strict guard, the Stop hook, the cheap helpers and the Opus reviews all work as in any mission.
+THANOS_CLAUDE_ARGS adds arguments to the `claude` command (a model, --plugin-dir). With no workspace the batch lives under
+~/.dynamia/thanos/working-trees (see `thanos new`).
 `sessions` lists the thanos-* tmux sessions with the mission summary and a guessed state; `needs-you` means a permission prompt waits."""
 from __future__ import annotations
 
@@ -98,10 +100,14 @@ def launch(ws: Workspace, args: list[str]) -> int:
     elif goal:
         (bp / BRIEF).write_text(f"# THANOS brief\n\n## Goal\n{goal}\n")
     _trust(wt)
-    inner = (f"claude --name {shlex.quote(socket.gethostname() + ':' + session)} {shlex.quote(prompt)}; "
+    extra = " ".join(shlex.quote(a) for a in shlex.split(os.environ.get("THANOS_CLAUDE_ARGS", "")))   # e.g. --model or --plugin-dir
+    inner = (f"claude {extra + ' ' if extra else ''}--name {shlex.quote(socket.gethostname() + ':' + session)} {shlex.quote(prompt)}; "
              f"printf '\\n[claude exited: press Enter to close]'; read _; tmux kill-session -t {shlex.quote(session)}")
     # The tmux server keeps the directory it starts in: start it in the workspace root, never in a batch worktree.
-    r = subprocess.run(["tmux", "new-session", "-d", "-s", session, "-n", session, "-c", str(wt), inner], cwd=str(ws.root), capture_output=True, text=True)
+    ws.root.mkdir(parents=True, exist_ok=True)
+    # -e: a tmux server that was already running has the PATH it started with; the session gets the one of whoever launches it.
+    r = subprocess.run(["tmux", "new-session", "-d", "-s", session, "-n", session, "-c", str(wt), "-e", f"PATH={os.environ.get('PATH', '')}", inner],
+                       cwd=str(ws.root), capture_output=True, text=True)
     if r.returncode != 0:
         die(f"tmux could not start the session: {(r.stderr or r.stdout).strip()[:200]}")
     if "--no-remote" not in args:

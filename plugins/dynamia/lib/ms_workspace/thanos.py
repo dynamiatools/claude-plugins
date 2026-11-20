@@ -1,5 +1,6 @@
 """THANOS: an autonomous mission inside its own batch worktree.
 
+    ms-workspace thanos new <slug> [repo...]      open the batch (batch new thanos-<slug>); with no workspace: repo paths, worktrees in ~/.dynamia/thanos
     ms-workspace thanos start <batch> [--goal T] [--max-steps N | --until-usage PCT] [--max-opus N] [--opus-used N] [--push-every N] [--deny-host H]
     ms-workspace thanos resume <batch>            re-attach this session to a mission that is still working
     ms-workspace thanos estimate <batch>          steps the task list in THANOS.md needs, and the cap that would be used
@@ -39,7 +40,7 @@ import sys
 import time
 from pathlib import Path
 
-from .core import Workspace, batch_repos, die, git, git_ok, git_out, need_batch
+from .core import HomeWorkspace, Workspace, batch_repos, die, git, git_ok, git_out, need_batch
 from .usage import cache_dir
 
 UNTIL_USAGE_STEPS = 10000
@@ -266,15 +267,15 @@ def cmd_thanos(ws: Workspace | None, args: list[str]) -> int:
     if sub in ("procs", "kill"):
         return (_procs if sub == "procs" else _kill_cmd)(ws, rest)
     if ws is None:
-        die("THANOS needs a workspace (run the dynamia:workspace-init skill first)")
+        ws = HomeWorkspace()   # no workspace.toml: the mission lives under ~/.dynamia/thanos
     if sub in ("launch", "sessions"):
         from . import thanos_launch
         return (thanos_launch.launch if sub == "launch" else thanos_launch.list_sessions)(ws, rest)
-    handler = {"start": _start, "resume": _resume, "estimate": _estimate, "status": _status, "task": _task, "block": _block,
+    handler = {"new": _new, "start": _start, "resume": _resume, "estimate": _estimate, "status": _status, "task": _task, "block": _block,
                "wait": _wait, "pause": _pause, "done": _done, "stop": _stop, "run": _run, "unblock": _unblock,
                "allow-suggest": _allow_suggest, "extend": _extend}.get(sub)
     if handler is None:
-        die("usage: thanos start|resume|extend|launch|sessions|estimate|status|task|block|unblock|wait|run|procs|kill|allow-suggest|pause|done|stop|panel (see ms-workspace help)")
+        die("usage: thanos new|start|resume|extend|launch|sessions|estimate|status|task|block|unblock|wait|run|procs|kill|allow-suggest|pause|done|stop|panel (see ms-workspace help)")
     return handler(ws, rest)
 
 
@@ -345,6 +346,20 @@ def _start(ws: Workspace, args: list[str], extra: dict | None = None) -> int:
     if not sid:
         print("  note: this session could not be linked (no hook saw the start): the strict guard and the status badge need the hooks installed")
     return 0
+
+
+def _new(ws: Workspace, args: list[str]) -> int:
+    """Open the batch for a mission: `batch new thanos-<slug>`. With no workspace the repos are paths (default: the repo of the
+    current directory) and the worktrees go under ~/.dynamia/thanos/working-trees."""
+    from .batches import cmd_batch
+    names = _positional(args)
+    if not names:
+        die("usage: thanos new <slug> [repo...]   (without a workspace: [repo-path...], default the repo of the current directory)")
+    slug = names[0].removeprefix("thanos-")
+    repos = names[1:]
+    if isinstance(ws, HomeWorkspace):
+        repos = [ws.register(p) for p in (repos or [None])]
+    return cmd_batch(ws, ["new", f"thanos-{slug}", *repos])
 
 
 def _resume(ws: Workspace, args: list[str]) -> int:

@@ -321,6 +321,9 @@ def cmd_guard() -> int:
         return decided
     root = find_workspace_root()
     if root is None:
+        launch = [c for c in confirm_reasons(os.getcwd(), command) if c.startswith("thanos launch")]   # a mission needs no workspace
+        if launch:
+            _ask(os.getcwd(), command, launch[0] + ".")
         return 0
     names = {".batches", batch_dirname(root)}
     confirm = confirm_reasons(root, command)
