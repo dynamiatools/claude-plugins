@@ -1,6 +1,6 @@
 ---
 name: memory
-description: Saves, lists, searches, shows and forgets the workspace's durable notes (decisions, lessons, gotchas, handoffs) with ms-workspace memory. Use when the user asks to remember something, note a decision or lesson, leave a handoff, or see what was noted before.
+description: Saves, lists, searches, shows and forgets the workspace's durable notes (decisions, lessons, gotchas, handoffs) with ms-workspace memory. Use when the user asks to remember something, note a decision or lesson, leave a handoff, or see what was noted before. Triggers on "recuerda que...", "anota esta decisión".
 argument-hint: "add <text> | list | search <words> | show <name> | forget <name>"
 ---
 

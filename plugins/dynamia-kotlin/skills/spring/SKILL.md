@@ -1,6 +1,6 @@
 ---
 name: spring
-description: Kotlin with Spring Boot 4 - compiler plugins (kotlin-spring, kotlin-jpa), runApplication, constructor-bound configuration properties as data classes, JPA entities in Kotlin, Jackson with the Kotlin module, null-safety with JSpecify, testing with JUnit and Mockito or MockK, and Maven or Gradle setup. Use when adding Kotlin to a Spring Boot or Dynamia application, writing Spring code in Kotlin, or fixing proxy, JPA or JSON problems in Kotlin.
+description: Kotlin with Spring Boot 4 - kotlin-spring and kotlin-jpa plugins, runApplication, constructor-bound properties as data classes, JPA entities, Jackson Kotlin module, JSpecify null-safety, JUnit with Mockito or MockK. Use when adding Kotlin to a Spring Boot or Dynamia application, writing Spring code in Kotlin, or fixing proxy, JPA or JSON problems in Kotlin.
 argument-hint: "[file or topic]"
 ---
 

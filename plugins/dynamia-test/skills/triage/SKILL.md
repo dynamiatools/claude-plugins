@@ -1,6 +1,6 @@
 ---
 name: triage
-description: Diagnoses failing, flaky or slow tests in Java, Kotlin and JavaScript projects - reads the report, classifies the cause (code bug, test bug, flaky, environment, configuration, build), reproduces it, isolates it, and proposes the smallest fix. Use when a test run fails, a test passes locally but fails in CI, a test is intermittent, or the suite got slower.
+description: Diagnoses failing, flaky or slow tests in Java, Kotlin and JavaScript - reads the report, classifies the cause (code bug, test bug, flaky, environment, configuration, build), reproduces it and proposes the smallest fix. Use whenever a test fails, is intermittent, passes locally but fails in CI, or the suite got slower, even when the cause looks obvious. Triggers on "este test falla a veces", "flaky test", "falla solo en CI".
 argument-hint: "[failing test or log]"
 ---
 

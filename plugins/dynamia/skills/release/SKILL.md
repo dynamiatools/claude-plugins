@@ -1,6 +1,6 @@
 ---
 name: release
-description: Shows what waits to be promoted from a base branch to qa or main, and drafts release notes, with ms-workspace release. Read-only. Use when the user asks what is pending for a release, what changed since qa or main, or for release notes.
+description: Shows what waits to be promoted from a base branch to qa or main, and drafts release notes, with ms-workspace release. Read-only. Use when the user asks what is pending for a release, what changed since qa or main, or for release notes. Triggers on "qué falta para pasar a qa", "notas de la release".
 argument-hint: "status | notes [repo]"
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: backend
-description: Dynamia Platform backend patterns for any project using tools.dynamia.* - entities extending BaseEntity, CrudService and QueryParameters, ModuleProvider and CrudPage navigation, actions, validators, CrudServiceListener, ViewCustomizer and the YAML view descriptors (form, table, tree, json, crud, entityfilters). Use when writing or reviewing Java/Kotlin/Groovy code or META-INF/descriptors in a Dynamia project.
+description: Dynamia Platform backend patterns for projects using tools.dynamia.* - entities extending BaseEntity, CrudService, QueryParameters, ModuleProvider and CrudPage, actions, validators, CrudServiceListener, ViewCustomizer and the YAML view descriptors. Use when writing or reviewing Java, Kotlin or Groovy code or META-INF descriptors in a Dynamia project. Triggers on "agrega una entidad con su CRUD", "crea una vista".
 ---
 
 # dynamia-platform:backend

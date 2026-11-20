@@ -1,6 +1,6 @@
 ---
 name: extensions
-description: Dynamia Platform extensions (dynamiatools/framework extensions folder) - entity-files (attach files to entities), reports (stored queries, REST, export), http-functions (versioned HTTP calls to third parties) and finances (document totals, taxes, money) - dashboard, email-sms, file-importer, saas and a pointer to security. Use when a task attaches or stores files, builds or runs reports, integrates an external HTTP API, or calculates invoices, taxes, discounts or withholdings.
+description: Dynamia Platform extensions from dynamiatools/framework - entity-files, reports (stored queries, REST, export), http-functions (versioned third-party calls), finances (totals, taxes, money), dashboard, email-sms, file-importer, saas. Use when a task attaches or stores files, builds or runs reports, calls an external HTTP API, or calculates invoices, taxes, discounts or withholdings in a Dynamia project.
 ---
 
 # dynamia-platform:extensions

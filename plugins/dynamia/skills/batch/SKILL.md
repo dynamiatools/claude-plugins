@@ -1,6 +1,6 @@
 ---
 name: batch
-description: Starts or inspects a batch of local work across the repos of a workspace. Creates isolated worktrees (one per repo, optionally one per agent) so changes never touch shared checkouts and nothing is pushed; for a small task it recommends a plain local branch instead and asks which the user prefers. Use when the user wants to start a feature or fix that spans repos, run several agents in parallel safely, or see which batches exist.
+description: Starts or inspects a batch of local work across the repos of a dynamia workspace - isolated worktrees, one per repo or agent, nothing pushed; for a small task it recommends a plain local branch and asks which the user prefers. Use when the user wants to start a feature or fix that spans repos, run agents in parallel safely, or see which batches exist. Triggers on "empieza un batch", "crea un worktree para esto".
 argument-hint: "[batch-name]"
 allowed-tools: Bash(ms-workspace status:*) Bash(ms-workspace usage:*) Bash(ms-workspace batch new:*) Bash(ms-workspace branch new:*) Bash(ms-workspace agent new:*) Bash(ms-workspace memory:*)
 ---

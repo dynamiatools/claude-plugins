@@ -1,6 +1,6 @@
 ---
 name: jvm
-description: Writes and fixes JVM tests - JUnit Jupiter 6, AssertJ, Mockito 5, Spring Boot 4 test slices and MockMvc, Testcontainers, Awaitility, parameterized and nested tests, Maven Surefire and Failsafe or Gradle test setup, and Kotlin tests. Use when writing or running Java or Kotlin tests, setting up a test module, testing Spring, JPA or REST code, or upgrading test libraries.
+description: Writes and fixes JVM tests - JUnit Jupiter 6, AssertJ, Mockito 5, Spring Boot 4 slices and MockMvc, Testcontainers, Awaitility, Surefire and Failsafe or Gradle setup, Kotlin tests. Use whenever the user asks to write, run or fix Java or Kotlin tests, even a single small one, or to test Spring, JPA or REST code, because it holds the conventions to follow. Triggers on "escribe tests para este servicio", "write unit tests", "agrega un test".
 argument-hint: "[class or test]"
 ---
 

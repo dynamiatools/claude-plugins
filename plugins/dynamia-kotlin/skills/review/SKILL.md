@@ -1,6 +1,6 @@
 ---
 name: review
-description: Reviews Kotlin code for null-safety, idiom, immutability, Java interop, coroutine leaks, error handling, serialization and persistence problems, and reports findings with file and line. Use when asked to review a Kotlin change, class or module, before a commit or pull request, or to audit Kotlin code for bugs and risks.
+description: Reviews Kotlin code for null-safety, idiom, immutability, Java interop, coroutine leaks, error handling, serialization and persistence problems, and reports findings with file and line. Use when asked to review a Kotlin change, class or module, before a commit or pull request, or to audit Kotlin code for bugs and risks. Triggers on "revisa este código Kotlin", "review my Kotlin".
 argument-hint: "[path or diff]"
 ---
 

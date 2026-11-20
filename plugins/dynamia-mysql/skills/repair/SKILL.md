@@ -1,6 +1,6 @@
 ---
 name: repair
-description: Diagnoses a broken MySQL, Percona or MariaDB replica with mysql-tool diagnose and picks the safe way out - connection problem, purged binary logs, errant GTIDs or data divergence - without skipping transactions. Use when replication stopped, the SQL thread has an error, or the user asks how to fix a replica.
+description: Diagnoses a broken MySQL, Percona or MariaDB replica with mysql-tool diagnose and picks the safe way out - connection problem, purged binary logs, errant GTIDs or data divergence - without skipping transactions. Use when replication stopped or the SQL or IO thread has an error and the user wants it fixed. Triggers on "la réplica dejó de replicar", "error en el SQL thread".
 ---
 
 # repair
