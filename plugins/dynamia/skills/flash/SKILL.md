@@ -7,9 +7,9 @@ allowed-tools: Bash(ms-workspace flash:*) Bash(ms-workspace usage:*)
 
 # dynamia:flash
 
-> ⚡ **FLASH.** Fast, small, working. Production comes later.
+> ⚡ **My name is Barry Allen, and I am the fastest developer alive.**
 
-When you start, run `ms-workspace flash on ${CLAUDE_SESSION_ID}` (it turns on the red `[FLASH IS RUNNING]` badge in the status line), then print that line and, below it, `⚡ Gotta go fast.` The goal is a prototype that runs, not a product. Speed beats polish, but a prototype that explodes or leaks is not a prototype, so one Opus pass at the end checks that.
+When you start, run `ms-workspace flash on ${CLAUDE_SESSION_ID}` (it turns on the red `[FLASH IS RUNNING]` badge in the status line), then print that line, word for word, as the first thing the user sees. The goal is a prototype that runs, not a product. Speed beats polish, but a prototype that explodes or leaks is not a prototype, so one Opus pass at the end checks that.
 
 ## Rules
 - **No question round.** Decide with sensible defaults and keep a list of them for the report. Ask only if the goal cannot be understood at all, and then one short question.
