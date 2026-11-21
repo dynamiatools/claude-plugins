@@ -5828,6 +5828,23 @@ class TestThanos(Base):
         self.assertEqual(self.state(d)["status"], "working")
         self.assertEqual(self.bash("ssh prod", d / "lib").returncode, 2, "strict again")
 
+    def test_the_status_line_shows_the_flash_badge_between_flash_on_and_off(self):
+        if not shutil.which("jq"):
+            self.skipTest("jq missing")
+        d = self.start()
+        sl = str(REPO / "bin" / "ms-statusline")
+
+        def line(sid, **env):
+            return run([sl], env={**self.ws.env, **env}, input=json.dumps({"model": {"display_name": "M"}, "cwd": str(d), "session_id": sid})).stdout
+        self.assertNotIn("FLASH", line("fl1"))
+        self.assertOk(self.ws.ms("flash", "on", "fl1"))
+        self.assertIn("1;93;48;2;200;30;30", line("fl1"), "bold yellow on red")
+        self.assertIn("[FLASH IS RUNNING] ", line("fl1", NO_COLOR="1"))
+        self.assertNotIn("FLASH", line("other"))
+        self.assertOk(self.ws.ms("flash", "off", "fl1"))
+        self.assertNotIn("FLASH", line("fl1"))
+        self.assertEqual(self.ws.ms("flash", "on").returncode, 2)
+
     def test_the_status_line_shows_the_purple_badge_only_while_the_mission_works(self):
         if not shutil.which("jq"):
             self.skipTest("jq missing")

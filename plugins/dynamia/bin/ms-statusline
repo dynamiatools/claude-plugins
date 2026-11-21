@@ -88,6 +88,12 @@ if [[ "$sid" != "-" && -f "$tfile" && -z "$(find "$tfile" -mmin +720 2>/dev/null
   fi
 fi
 
+# FLASH badge: shown while /dynamia:flash runs (pointer written by `ms-workspace flash on`; ignored when 4 h old).
+ffile="$CACHE_DIR/flash/${sid//[^A-Za-z0-9_-]/}.json"
+if [[ "$sid" != "-" && -f "$ffile" && -z "$(find "$ffile" -mmin +240 2>/dev/null)" ]]; then
+  if [[ -n "${NO_COLOR:-}" ]]; then badge="[FLASH IS RUNNING] $badge"; else badge="$(c '1;93;48;2;200;30;30')[FLASH IS RUNNING]$reset $badge"; fi   # bold yellow on red
+fi
+
 out="$badge$(c 36)[$model]$reset"
 if [[ -n "$branch" ]]; then
   out+=" $(c 35)⎇ $branch$reset"
