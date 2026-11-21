@@ -10,7 +10,7 @@ AI coding gets expensive and risky when the model does the boring parts: jugglin
 - **Spend tokens on purpose.** Cheap helper agents search and summarize; reports show where the plan went.
 - **Humans publish.** Agents commit locally. You decide what ships.
 
-It has 24 skills, 4 read-only helper agents, guard hooks, a standard-library Python tool (`ms-workspace`) and a status line.
+It has 25 skills, 9 helper agents, guard hooks, a standard-library Python tool (`ms-workspace`) and a status line.
 
 ## Install
 
@@ -53,6 +53,7 @@ These read `workspace.toml`. Without one the tool answers `no .dynamia/workspace
 | `/dynamia:ship` | Plan, sync, tests, push or PR. Only when you ask | Controlled publishing in one place |
 | `/dynamia:merge` | Waits for the CI checks of the PRs `ship` opened, merges them and updates the base branch of your checkout. Only when you ask | The step after `ship --pr` without `gh` and `git` by hand |
 | `/dynamia:thanos` | An autonomous mission: plans, works task by task in its own worktree, validates with Opus at the start and the end, and never ships. Strict guard, step cap, purple status badge | Long goals with few interruptions, without giving up the guard rails. Only when you ask |
+| `/dynamia:flash` | A quick prototype, alone and with no questions: works in the current branch, no commit or push unless you say so, a red `[FLASH IS RUNNING]` badge in the status line, Haiku helpers write the code, one final Opus pass lists explosions, security risks and a production architecture. No hooks | A spike or demo you want in minutes, without over-engineering. Only when you ask |
 | `/dynamia:dev-env` | Registers dev environment variables per repo or for all | Tests and e2e run with the right variables, kept out of the model's hands |
 | `/dynamia:open` | Opens a batch or an agent's worktrees in VS Code or IntelliJ | Review the work where you are used to reading code |
 | `/dynamia:memory` | Saves and finds durable notes: decisions, lessons, gotchas, handoffs | The log says what happened; notes say what was learned |
