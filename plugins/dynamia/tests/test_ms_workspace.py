@@ -2006,7 +2006,7 @@ class TestPackaging(unittest.TestCase):
             with self.subTest(agent=path.stem):
                 f = self.frontmatter(path)
                 self.assertEqual(f.get("name"), path.stem)
-                self.assertTrue(path.stem in {"boss", "scout", "summarizer", "test-triage", "log-triage", "pre-review", "runner"})
+                self.assertTrue(path.stem in {"boss", "scout", "summarizer", "test-triage", "log-triage", "pre-review", "runner", "flash-builder", "flash-auditor"})
                 self.assertIn(f.get("model"), ("haiku", "sonnet", "opus"))
                 self.assertTrue(f.get("description"))
                 for key, value in f.items():
